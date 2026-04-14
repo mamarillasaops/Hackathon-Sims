@@ -120,6 +120,37 @@ button {
 #objBtn { background: #1a2e3e; color: #60c8d8; border: 1px solid #2a5060; font-size: 0.82em; }
 #objBtn:hover { background: #1e3848; }
 #objBtn.active { background: #253545; border-color: #4a8090; }
+#airBtn { background: #1e2a1e; color: #80d8a0; border: 1px solid #2a5030; font-size: 0.82em; }
+#airBtn:hover { background: #263226; }
+#airBtn.active { background: #253545; border-color: #4a8060; }
+
+/* ── air density panel ── */
+#airPanel {
+  display: none;
+  background: #131f2e;
+  border: 1px solid #2a4060;
+  border-radius: 8px;
+  padding: 10px 18px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 360px;
+}
+#airPanel.open { display: flex; }
+#airPanelHeader {
+  display: flex; align-items: center; gap: 10px;
+  justify-content: space-between;
+}
+#airPanelTitle { font-size: 12px; color: #7090a8; }
+#rhoVal { font-family: 'Courier New', monospace; font-size: 13px; color: #c0d8f0; }
+#airEarthBtn {
+  padding: 3px 10px; border-radius: 4px; border: 1px solid #2a4060;
+  background: #1a2e44; color: #80d8a0; font-size: 11px; cursor: pointer; letter-spacing: 0;
+}
+#airEarthBtn:hover { background: #253545; }
+#airSliderRow { display: flex; align-items: center; gap: 8px; }
+#rhoSlider { flex: 1; accent-color: #80d8a0; cursor: pointer; height: 4px; }
+.air-lbl { font-size: 10px; color: #506878; white-space: nowrap; }
 
 /* ── object panel ── */
 #objectPanel {
@@ -193,6 +224,7 @@ button {
   <button id="resetBtn">Reset</button>
   <button id="zoomBtn">Zoom Out</button>
   <button id="objBtn">Objects</button>
+  <button id="airBtn">Air</button>
 </div>
 
 <div id="objectPanel">
@@ -207,6 +239,19 @@ button {
     <button class="obj-choice" data-type="chute_closed">🪂 Chute Closed</button>
     <button class="obj-choice" data-type="chute_open">🪂 Chute Open</button>
     <button class="obj-choice" data-type="balloon">🎈 Balloon</button>
+  </div>
+</div>
+
+<div id="airPanel">
+  <div id="airPanelHeader">
+    <span id="airPanelTitle">Air Density</span>
+    <span id="rhoVal">1.225 kg/m³</span>
+    <button id="airEarthBtn">↺ Earth</button>
+  </div>
+  <div id="airSliderRow">
+    <span class="air-lbl">Vacuum (0)</span>
+    <input type="range" id="rhoSlider" min="0" max="4" step="0.025" value="1.225">
+    <span class="air-lbl">Dense (4.0)</span>
   </div>
 </div>
 
@@ -248,11 +293,11 @@ function updateBottleScale() {
      water  ≈ 500 g  (at 100 % fill)
    ───────────────────────────────────────────── */
 const g          = 9.8;
-const RHO        = 1.225;
+const RHO_EARTH  = 1.225;
+let   RHO        = RHO_EARTH;
 const C_D        = 0.9;
 const DIAM       = 0.06;
 const A          = Math.PI * (DIAM / 2) ** 2;
-const DRAG_K     = 0.5 * RHO * C_D * A;
 
 const MASS_EMPTY = 0.030;
 const MASS_WATER = 0.500;
@@ -264,12 +309,13 @@ const SIM_DT = 1 / 480;
 
 /* Per-object physics: fixedMass (kg, null = use water-fill calc),
    dragK = ½·ρ·C_d·A for that object's shape/size. */
+/* cdA = C_d × cross-section area (m²).  Drag force = ½·RHO·cdA·v²  */
 const OBJECT_TYPES = {
-  bottle:       { name: 'Bottle',        fixedMass: null,  dragK: DRAG_K },
-  bowling:      { name: 'Bowling Ball',  fixedMass: 6.35,  dragK: 0.5 * RHO * 0.47 * Math.PI * 0.108 ** 2 },
-  chute_closed: { name: 'Chute (Closed)',fixedMass: 0.020, dragK: 0.5 * RHO * 1.0  * 0.003 },
-  chute_open:   { name: 'Chute (Open)',  fixedMass: 0.020, dragK: 0.5 * RHO * 1.5  * 0.10  },
-  balloon:      { name: 'Balloon',       fixedMass: 0.012, dragK: 0.5 * RHO * 0.47 * Math.PI * 0.15 ** 2 },
+  bottle:       { name: 'Bottle',        fixedMass: null,  cdA: C_D * A },
+  bowling:      { name: 'Bowling Ball',  fixedMass: 6.35,  cdA: 0.47 * Math.PI * 0.108 ** 2 },
+  chute_closed: { name: 'Chute (Closed)',fixedMass: 0.020, cdA: 1.0  * 0.003 },
+  chute_open:   { name: 'Chute (Open)',  fixedMass: 0.020, cdA: 1.5  * 0.10  },
+  balloon:      { name: 'Balloon',       fixedMass: 0.012, cdA: 0.47 * Math.PI * 0.15 ** 2 },
 };
 
 const BOTTLES = [
@@ -282,6 +328,20 @@ const BOTTLES = [
 ];
 
 let state = 'idle', t0 = null, elapsed = 0, raf = null, prevTs = null;
+let airPanelOpen = false;
+
+/* Pre-generated air molecule dots (positions, drift params) */
+const AIR_DOT_MAX = 600;
+const airDots = Array.from({length: AIR_DOT_MAX}, () => ({
+  x:     Math.random() * W,
+  y:     Math.random() * GY,
+  r:     0.9 + Math.random() * 1.4,
+  speed: 0.25 + Math.random() * 0.9,
+  px:    Math.random() * Math.PI * 2,
+  py:    Math.random() * Math.PI * 2,
+  ax:    5 + Math.random() * 7,
+  ay:    4 + Math.random() * 6,
+}));
 
 /* ── helpers ── */
 function bottleMass(b) {
@@ -556,6 +616,45 @@ function drawBrickShape(b) {
   ctx.restore();
 }
 
+/* ── air density overlay ── */
+function drawAirDensity() {
+  if (!airPanelOpen) return;
+  const frac   = Math.min(1, RHO / 4.0);
+  const count  = Math.round(frac * AIR_DOT_MAX);
+  const t      = performance.now() * 0.001;
+
+  ctx.save();
+
+  /* subtle haze that thickens with density */
+  ctx.fillStyle = `rgba(140,175,215,${frac * 0.13})`;
+  ctx.fillRect(0, 0, W, GY);
+
+  /* molecules */
+  ctx.fillStyle = `rgba(80,120,175,${0.18 + frac * 0.28})`;
+  for (let i = 0; i < count; i++) {
+    const d = airDots[i];
+    const x = (d.x + Math.sin(t * d.speed + d.px) * d.ax + W) % W;
+    const y = (d.y + Math.cos(t * d.speed * 0.75 + d.py) * d.ay + GY) % GY;
+    ctx.beginPath(); ctx.arc(x, y, d.r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  /* ρ label in top-right corner */
+  ctx.font = 'bold 12px Courier New';
+  ctx.textAlign = 'right';
+  const label = `\u03c1 = ${RHO.toFixed(3)} kg/m\u00b3`;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.fillText(label, W - 9, 19);
+  ctx.fillStyle = RHO < 0.01 ? '#f08060' : '#d0eeff';
+  ctx.fillText(label, W - 10, 18);
+  if (RHO < 0.01) {
+    ctx.font = 'bold 11px Courier New';
+    ctx.fillStyle = '#f08060';
+    ctx.fillText('VACUUM', W - 10, 33);
+  }
+
+  ctx.restore();
+}
+
 /* ── main object dispatcher (replaces drawBottle) ── */
 function drawObject(b) {
   if (b.shattered) { drawBadge(b, 0); return; }
@@ -637,14 +736,14 @@ function tickSparks(b, dt) {
 }
 
 function draw() {
-  ctx.clearRect(0, 0, W, H); drawBg(); drawRuler();
+  ctx.clearRect(0, 0, W, H); drawBg(); drawRuler(); drawAirDensity();
   BOTTLES.forEach((b, i) => { drawObject(b); drawSparks(b); });
 }
 
 /* ── single Euler sub-step ── */
 function physicsStep(b, dt) {
   const m    = bottleMass(b);
-  const drag = OBJECT_TYPES[b.type].dragK * b.vy * b.vy;
+  const drag = 0.5 * RHO * OBJECT_TYPES[b.type].cdA * b.vy * b.vy;
   const a    = g - drag / m;
   b.vy    += a * dt;
   b.fallen += b.vy * dt;
@@ -659,7 +758,7 @@ function animate(ts) {
 
   let allLanded = true;
   for (const b of BOTTLES) {
-    if (!b.landed) {
+    if (state === 'falling' && !b.landed) {
       allLanded = false;
 
       /* Chop frame interval into fixed sub-steps
@@ -690,9 +789,15 @@ function animate(ts) {
     state = 'done';
     document.getElementById('dropBtn').disabled = false;
   }
-  if (!allLanded || BOTTLES.some(b => b.sparks.length > 0)) {
+  if ((state === 'falling' && !allLanded) || BOTTLES.some(b => b.sparks.length > 0) || airPanelOpen) {
     raf = requestAnimationFrame(animate);
+  } else {
+    raf = null;
   }
+}
+
+function startAnimIfNeeded() {
+  if (airPanelOpen && !raf) raf = requestAnimationFrame(animate);
 }
 
 /* ── slider wiring ── */
@@ -704,7 +809,7 @@ function wire(sid, did, prop, idx, fmt) {
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     state = 'idle';
     document.getElementById('dropBtn').disabled = false;
-    init(); draw();
+    init(); draw(); startAnimIfNeeded();
   });
 }
 wire('h1', 'h1v', 'h',     0, v => v.toFixed(1) + ' m');
@@ -722,7 +827,7 @@ document.getElementById('dropBtn').addEventListener('click', () => {
 document.getElementById('resetBtn').addEventListener('click', () => {
   if (raf) { cancelAnimationFrame(raf); raf = null; }
   state = 'idle'; document.getElementById('dropBtn').disabled = false;
-  init(); draw();
+  init(); draw(); startAnimIfNeeded();
 });
 
 document.getElementById('zoomBtn').addEventListener('click', () => {
@@ -746,7 +851,7 @@ document.getElementById('zoomBtn').addEventListener('click', () => {
   if (raf) { cancelAnimationFrame(raf); raf = null; }
   state = 'idle';
   document.getElementById('dropBtn').disabled = false;
-  init(); draw();
+  init(); draw(); startAnimIfNeeded();
 });
 
 /* ── object panel logic ── */
@@ -792,8 +897,31 @@ document.querySelectorAll('.obj-choice').forEach(btn => {
     if (raf) { cancelAnimationFrame(raf); raf = null; }
     state = 'idle';
     document.getElementById('dropBtn').disabled = false;
-    init(); draw();
+    init(); draw(); startAnimIfNeeded();
   });
+});
+
+/* ── air density panel logic ── */
+function setRho(val) {
+  RHO = val;
+  document.getElementById('rhoSlider').value = val;
+  document.getElementById('rhoVal').textContent = val.toFixed(3) + ' kg/m³';
+}
+
+document.getElementById('airBtn').addEventListener('click', () => {
+  airPanelOpen = !airPanelOpen;
+  document.getElementById('airPanel').classList.toggle('open', airPanelOpen);
+  document.getElementById('airBtn').classList.toggle('active', airPanelOpen);
+  startAnimIfNeeded();
+  if (!airPanelOpen) draw(); // one clean redraw without dots when closing
+});
+
+document.getElementById('rhoSlider').addEventListener('input', function () {
+  setRho(parseFloat(this.value));
+});
+
+document.getElementById('airEarthBtn').addEventListener('click', () => {
+  setRho(RHO_EARTH);
 });
 
 updateBottleScale(); init(); draw();
