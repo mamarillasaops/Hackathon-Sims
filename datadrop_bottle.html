@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DataDrop</title>
+  <style>
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body {
+      background:#1a2e44;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      min-height:100vh;
+      user-select:none;
+      overflow:hidden;
+    }
+    canvas { display:block; border-radius:10px; box-shadow:0 8px 36px rgba(0,20,50,0.6); }
+  </style>
+</head>
+<body>
+<canvas id="gc" width="820" height="540"></canvas>
+<script>
+'use strict';
+
+const canvas = document.getElementById('gc');
+const ctx    = canvas.getContext('2d');
+const W = 820, H = 540;
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+const LEFT_W  = 170;   // meterstick panel width
+const RIGHT_X = 580;   // right panel start x
+const GY      = 490;   // ground y
+const PPM     = 72;    // pixels per metre
+
+// Bottle dimensions (matching free_fall_sim_wide)
+const BW = 40, BH = 46, NW = 18, NH = 14, CW = 22, CH = 7;
+const TH = BH + NH + CH;   // total bottle height
+
+const BX       = 375;                      // bottle centre x in drop zone
+const DROP_H   = 3.5;                      // drop height in metres (fixed medium)
+const BY0      = GY - DROP_H * PPM;        // bottle bottom y at rest (≈ 238)
+const BY1      = GY;                       // landing y
+
+const BOTTLE_COLOR = '#4a90f0';
+const BOTTLE_CAP   = '#1a60c0';
+const WATER_PCT    = 50;                   // medium water fill
+
+// Meterstick pivot
+const PIV  = {x:85,  y:GY - 8};
+const SLEN = 338;
+const SW   = 26;
+
+// Vertical indicator — sits on the ground right next to the bottle
+const IND = { cx:BX + 62, cy:GY - 2, hw:44, sw:28, nh:22 };
+
+// Data table (right panel, full height — no header)
+const TBL = { x:587, y:4, w:225, rh:52 };
+
+// ── Medium difficulty constants ───────────────────────────────────────────────
+const BAL_THRESH      = 0.15;   // radians — balance zone half-width
+const PEND_GRAV       = 1.0;    // pendulum difficulty multiplier
+const IND_SPEED       = 285;    // indicator px/s
+const REL_TARGET      = 12;     // A-presses for full release score
+const FALL_DUR        = 2.0;    // seconds of balanced fall = 100% balance score
+const READY_THRESHOLD = 5;      // A-presses while balanced needed to start drop
+const SPACE_OPEN      = 1.8;    // seconds post-drop before SPACE is valid
+const SPACE_CLOSE     = 4.8;    // SPACE window closes → auto-land
+
+// ── Game state ────────────────────────────────────────────────────────────────
+let S = 'INTRO';   // INTRO | PLAYING | RES | DONE
+let dpts = [];
+let sc = {b:0, r:0, l:0};
+
+// Physics
+let ang=0, avel=0;
+// Bottle fall
+let by = BY0;
+// Round tracking
+let roundTime=0;
+// Vertical indicator
+let iy=IND.cy, idir=1;
+// Flags
+let landed=false, dropInitiated=false, readyPresses=0;
+// Timers / flashes
+let aFlash=0, earlyFlash=0, resT=0;
+// Visual particles
+let pts=[];
+// Impact sparks
+let sparks=[];
+
+// ── Input ─────────────────────────────────────────────────────────────────────
+const K = {};
+window.addEventListener('keydown', e => {
+  if (e.code==='Space') e.preventDefault();
+  if (K[e.code]) return;
+  K[e.code] = true;
+
+  if (e.code==='KeyA' && S==='PLAYING' && !landed) {
+    aFlash = 0.18;
+    mkAPtcl();
+    if (!dropInitiated) {
+      if (Math.abs(ang) < BAL_THRESH) {
+        readyPresses++;
+        if (readyPresses >= READY_THRESHOLD) { dropInitiated=true; roundTime=0; }
+      }
+    } else {
+      sc.r = (sc.r||0) + 1;
+    }
+  }
+
+  if (e.code==='Space' || e.code==='Enter') {
+    if (S==='PLAYING' && !landed) {
+      const inWindow = dropInitiated && roundTime>=SPACE_OPEN && roundTime<=SPACE_CLOSE;
+      if (inWindow) doLand();
+      else earlyFlash = 0.28;
+    } else if (S==='INTRO' || S==='DONE') {
+      advance();
+    }
+  }
+});
+window.addEventListener('keyup', e => { K[e.code]=false; });
+
+// ── Flow ──────────────────────────────────────────────────────────────────────
+function advance() {
+  if (S==='INTRO') { dpts=[]; goPlay(); }
+  else if (S==='DONE') { S='INTRO'; }
+}
+
+function goPlay() {
+  S = 'PLAYING';
+  ang  = (Math.random()>0.5?1:-1)*(0.10+Math.random()*0.16);
+  avel = 0;
+  by   = BY0;
+  roundTime = 0;
+  iy   = IND.cy + (Math.random()>0.5?1:-1)*(IND.hw*0.2+Math.random()*IND.hw*0.38);
+  idir = Math.random()>0.5 ? 1 : -1;
+  landed=false; dropInitiated=false; readyPresses=0; earlyFlash=0;
+  sc = {b:0,r:0,l:0};
+  sparks = [];
+}
+
+function doLand() {
+  by = BY1;
+  spawnSparks();
+
+  const d = Math.abs(iy - IND.cy);
+  const landScore = Math.max(0, Math.min(100, 100-(d/IND.hw)*116));
+  const balScore  = Math.min(100, Math.max(0, 100*(FALL_DUR/Math.max(FALL_DUR,roundTime))));
+  const relScore  = Math.min(100, Math.max(0, ((sc.r||0)/REL_TARGET)*100));
+
+  sc = {b:balScore, r:relScore, l:landScore};
+  landed = true;
+  saveDpt();
+}
+
+function saveDpt() {
+  const {b,r,l} = sc;
+  const ov = (b+r+l)/3;
+  const ok = ov>=20 && b>=15 && r>=15 && l>=15;
+  dpts.push({b,r,l,ov,ok});
+  S='RES'; resT=2.3;
+}
+
+// ── Sparks ────────────────────────────────────────────────────────────────────
+function spawnSparks() {
+  for (let i=0;i<8;i++) {
+    const a=-Math.PI*(0.12+Math.random()*0.76), s=30+Math.random()*65;
+    sparks.push({type:'dust', x:BX+(Math.random()-0.5)*BW*0.9, y:GY-2,
+      vx:Math.cos(a)*s, vy:Math.sin(a)*s, r:1.5+Math.random()*2.5, life:0.55+Math.random()*0.3});
+  }
+  for (let i=0;i<12;i++) {
+    const a=-Math.PI*(0.08+Math.random()*0.84), s=55+Math.random()*130;
+    sparks.push({type:'drop', x:BX+(Math.random()-0.5)*BW*0.7, y:GY-4,
+      vx:Math.cos(a)*s, vy:Math.sin(a)*s, r:2+Math.random()*3.5, life:0.7+Math.random()*0.5});
+  }
+}
+
+function tickSparks(dt) {
+  for (const p of sparks) {
+    p.x+=p.vx*dt; p.y+=p.vy*dt; p.vy+=920*dt;
+    p.life-=dt*(p.type==='dust'?3.5:2);
+  }
+  sparks = sparks.filter(p=>p.life>0 && p.y<GY+30);
+}
+
+// ── A-press particles ─────────────────────────────────────────────────────────
+function mkAPtcl() {
+  pts.push({
+    x:BX+(Math.random()-0.5)*28, y:by+(Math.random()-0.5)*20,
+    vx:(Math.random()-0.5)*60, vy:-20-Math.random()*45,
+    t:0.38+Math.random()*0.22, mt:0.38+Math.random()*0.22,
+    sz:2+Math.random()*3, c:`hsl(${28+Math.random()*38},100%,60%)`,
+  });
+}
+
+// ── Update ────────────────────────────────────────────────────────────────────
+let lastTs=0;
+function update(dt) {
+  aFlash     = Math.max(0, aFlash-dt);
+  earlyFlash = Math.max(0, earlyFlash-dt);
+  pts = pts.filter(p=>{p.x+=p.vx*dt;p.y+=p.vy*dt;p.vy+=105*dt;p.t-=dt;return p.t>0;});
+  tickSparks(dt);
+
+  if (S==='PLAYING') {
+    const balanced = Math.abs(ang) < BAL_THRESH;
+
+    // Inverted-pendulum physics
+    avel += ang * PEND_GRAV * 1.80 * dt;
+    avel += (Math.random()-0.5) * 0.055 * PEND_GRAV * dt;
+    // At steep angles gravity torque exceeds the flat 1.85 key-force, so
+    // scale it up so the player always has enough authority to recover.
+    const keyForce = Math.abs(ang) > 0.65 ? 3.4 : 1.85;
+    if (K['ArrowLeft'])  avel -= keyForce*dt;
+    if (K['ArrowRight']) avel += keyForce*dt;
+    avel *= Math.exp(-1.9*dt);
+    ang  += avel*dt;
+    const maxA = Math.PI/2.8;
+    // Give a real bounce (50%) so the stick visibly kicks away from the wall
+    if (Math.abs(ang)>maxA) { ang=Math.sign(ang)*maxA; avel*=-0.50; }
+
+    // Vertical indicator
+    iy += idir * IND_SPEED * dt;
+    if (iy > IND.cy+IND.hw) { iy=IND.cy+IND.hw; idir=-1; }
+    if (iy < IND.cy-IND.hw) { iy=IND.cy-IND.hw; idir= 1; }
+
+    if (dropInitiated) {
+      roundTime += dt;
+      if (balanced && !landed) {
+        const progress   = (by-BY0)/(BY1-BY0);
+        const nomSpeed   = (BY1-BY0)/FALL_DUR;
+        const slowFactor = progress < 0.65 ? 1.0 : Math.max(0.04,(1.0-progress)/0.35);
+        by = Math.min(BY1-2, by + nomSpeed*slowFactor*dt);
+      }
+      if (!landed && (roundTime>SPACE_CLOSE || roundTime>25)) doLand();
+    }
+  }
+  else if (S==='RES') {
+    resT -= dt;
+    if (resT<=0) { if (dpts.length>=10) S='DONE'; else goPlay(); }
+  }
+}
+
+// ── Drawing helpers ───────────────────────────────────────────────────────────
+function rr(x,y,w,h,r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y); ctx.lineTo(x+w-r,y); ctx.arcTo(x+w,y,x+w,y+r,r);
+  ctx.lineTo(x+w,y+h-r); ctx.arcTo(x+w,y+h,x+w-r,y+h,r);
+  ctx.lineTo(x+r,y+h); ctx.arcTo(x,y+h,x,y+h-r,r);
+  ctx.lineTo(x,y+r); ctx.arcTo(x,y,x+r,y,r);
+  ctx.closePath();
+}
+function qColor(v) {
+  if (v>=82) return '#1a8c38'; if (v>=65) return '#72b030';
+  if (v>=45) return '#c89820'; if (v>=25) return '#d86020';
+  return '#c82020';
+}
+function txt(s,x,y,{size=13,col='#ccc',align='left',bold=false}={}) {
+  ctx.fillStyle=col; ctx.font=`${bold?'bold ':''}${size}px "Courier New"`;
+  ctx.textAlign=align; ctx.fillText(s,x,y);
+}
+function miniBar(x,y,w,h,pct,fill) {
+  ctx.fillStyle='rgba(0,0,0,0.22)'; ctx.fillRect(x,y,w,h);
+  ctx.fillStyle=fill; ctx.fillRect(x,y,w*Math.max(0,Math.min(1,pct)),h);
+}
+
+// ── Background ────────────────────────────────────────────────────────────────
+function drawBg() {
+  // Sky — full canvas width
+  const skyGrd = ctx.createLinearGradient(0,0,0,GY);
+  skyGrd.addColorStop(0,'#6ea8d8'); skyGrd.addColorStop(1,'#c0dff5');
+  ctx.fillStyle=skyGrd; ctx.fillRect(0,0,W,GY);
+
+  // Metre grid lines — full width
+  ctx.strokeStyle='rgba(0,70,160,0.07)'; ctx.lineWidth=1;
+  for (let m=1;m<=6;m++) {
+    const y=GY-m*PPM; if (y<0) break;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+
+  // Ground — full width
+  ctx.fillStyle='#6a481a'; ctx.fillRect(0,GY,W,H-GY);
+  ctx.fillStyle='#987028'; ctx.fillRect(0,GY,W,3);
+
+  // Frosted card behind data table (right side)
+  ctx.fillStyle='rgba(255,255,255,0.42)';
+  ctx.fillRect(RIGHT_X-6, 0, W-(RIGHT_X-6), H);
+}
+
+// ── Metre ruler ───────────────────────────────────────────────────────────────
+function drawRuler() {
+  for (let m=0;m<=5;m++) {
+    const y=GY-m*PPM; if (y<0) break;
+    ctx.strokeStyle='rgba(15,55,130,0.60)'; ctx.lineWidth=1.2;
+    ctx.beginPath(); ctx.moveTo(LEFT_W+8,y); ctx.lineTo(LEFT_W+20,y); ctx.stroke();
+    ctx.fillStyle='rgba(10,45,110,0.70)'; ctx.font='11px Georgia';
+    ctx.textAlign='right'; ctx.fillText(m+'m', LEFT_W+6, y+4);
+  }
+  ctx.strokeStyle='rgba(15,55,130,0.18)'; ctx.lineWidth=0.8;
+  ctx.beginPath(); ctx.moveTo(LEFT_W+20,GY); ctx.lineTo(LEFT_W+20,GY-5*PPM); ctx.stroke();
+}
+
+// ── Drop zone guide ───────────────────────────────────────────────────────────
+function drawDropZone() {
+  ctx.strokeStyle='rgba(60,120,180,0.10)'; ctx.lineWidth=1;
+  ctx.setLineDash([2,7]);
+  [BX-38,BX+38].forEach(x=>{
+    ctx.beginPath(); ctx.moveTo(x,BY0-TH-14); ctx.lineTo(x,GY+6); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  ctx.strokeStyle='rgba(40,110,70,0.22)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(BX-54,GY+7); ctx.lineTo(BX+54,GY+7); ctx.stroke();
+}
+
+// ── Bottle ────────────────────────────────────────────────────────────────────
+function drawBottle(cx, bottomY) {
+  const b_ = bottomY;
+  const bT = b_-BH, nT = bT-NH, cT = nT-CH;
+
+  // Shadow
+  const sp = 1-Math.min(1,(GY-b_)/Math.max(1,DROP_H*PPM));
+  ctx.save(); ctx.globalAlpha=0.06+0.20*sp; ctx.fillStyle='#000';
+  ctx.beginPath(); ctx.ellipse(cx,GY+1,BW*0.5*(0.5+0.7*sp),3.5,0,0,Math.PI*2); ctx.fill(); ctx.restore();
+
+  // Water fill (clipped to body)
+  const wh = (WATER_PCT/100)*(BH-7);
+  if (wh>0) {
+    ctx.save(); rr(cx-BW/2+2,bT+2,BW-4,BH-4,5); ctx.clip();
+    ctx.fillStyle=BOTTLE_COLOR+'99';
+    ctx.fillRect(cx-BW/2+2, b_-2-wh, BW-4, wh);
+    ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.moveTo(cx-BW/2+5,b_-2-wh); ctx.lineTo(cx+BW/2-5,b_-2-wh); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Body
+  ctx.lineWidth=2; ctx.strokeStyle=BOTTLE_COLOR; ctx.fillStyle='rgba(210,235,255,0.14)';
+  rr(cx-BW/2,bT,BW,BH,7); ctx.fill(); ctx.stroke();
+
+  // Neck
+  ctx.fillStyle='rgba(210,235,255,0.12)'; ctx.strokeStyle=BOTTLE_COLOR; ctx.lineWidth=1.5;
+  ctx.fillRect(cx-NW/2,nT,NW,NH); ctx.strokeRect(cx-NW/2,nT,NW,NH);
+
+  // Cap
+  ctx.fillStyle=BOTTLE_CAP; rr(cx-CW/2,cT,CW,CH,3); ctx.fill();
+
+  // Shine
+  ctx.save(); rr(cx-BW/2+1,bT+1,BW-2,BH-2,6); ctx.clip();
+  ctx.fillStyle='rgba(255,255,255,0.20)'; rr(cx-BW/2+4,bT+6,6,BH-12,3); ctx.fill(); ctx.restore();
+}
+
+// ── Impact sparks ─────────────────────────────────────────────────────────────
+function drawSparks() {
+  for (const p of sparks) {
+    ctx.save(); ctx.globalAlpha=Math.max(0,p.life);
+    ctx.fillStyle = p.type==='drop' ? BOTTLE_COLOR+'cc' : '#a08060';
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ── Meterstick ────────────────────────────────────────────────────────────────
+function drawStick() {
+  const balanced = Math.abs(ang) < BAL_THRESH;
+  const needLeft  = ang >  0.07;
+  const needRight = ang < -0.07;
+
+  const arrowY = PIV.y - SLEN*0.50;
+
+  ctx.save(); ctx.globalAlpha = needLeft ? 1.0 : 0.20;
+  if (needLeft) { ctx.shadowColor='#2266cc'; ctx.shadowBlur=22; }
+  ctx.fillStyle='#1a3c88'; ctx.font='bold 26px Arial'; ctx.textAlign='center';
+  ctx.fillText('◄', PIV.x-44, arrowY+10); ctx.restore();
+
+  ctx.save(); ctx.globalAlpha = needRight ? 1.0 : 0.20;
+  if (needRight) { ctx.shadowColor='#2266cc'; ctx.shadowBlur=22; }
+  ctx.fillStyle='#1a3c88'; ctx.font='bold 26px Arial'; ctx.textAlign='center';
+  ctx.fillText('►', PIV.x+44, arrowY+10); ctx.restore();
+
+  ctx.save();
+  ctx.translate(PIV.x, PIV.y);
+  ctx.rotate(ang);
+
+  const g = ctx.createLinearGradient(-SW/2,0,SW/2,0);
+  g.addColorStop(0,'#ae8e28'); g.addColorStop(0.30,'#e4c660');
+  g.addColorStop(0.65,'#f0d87c'); g.addColorStop(1,'#ae8e28');
+  ctx.fillStyle=g; ctx.fillRect(-SW/2,-SLEN,SW,SLEN);
+  ctx.strokeStyle='#7a6018'; ctx.lineWidth=1.5;
+  ctx.strokeRect(-SW/2,-SLEN,SW,SLEN);
+
+  for (let i=0;i<=100;i++) {
+    const ty = -(SLEN*i/100);
+    const maj = i%10===0, mid = i%5===0 && !maj;
+    const len = maj?10:mid?6:3;
+    ctx.fillStyle='#382008'; ctx.fillRect(SW/2-len,ty-0.8,len,1.6);
+    if (maj) {
+      ctx.fillStyle='#2a1406'; ctx.font='7px "Courier New"'; ctx.textAlign='right';
+      ctx.fillText(`${100-i}`, -SW/2-2, ty+3.5);
+    }
+  }
+  ctx.fillStyle='rgba(200,30,30,0.55)';
+  ctx.fillRect(-SW/2,-SLEN*0.5-1.2,SW,2.4);
+  ctx.restore();
+
+  if (balanced) {
+    ctx.save(); ctx.shadowColor='#22ee88'; ctx.shadowBlur=32;
+    ctx.fillStyle='rgba(30,200,100,0.25)';
+    ctx.beginPath(); ctx.arc(PIV.x,PIV.y,22,0,Math.PI*2); ctx.fill(); ctx.restore();
+  }
+  ctx.fillStyle = balanced ? '#26a848' : '#3a5070';
+  ctx.beginPath(); ctx.arc(PIV.x,PIV.y,8,0,Math.PI*2); ctx.fill();
+  ctx.strokeStyle = balanced ? 'rgba(100,255,160,0.7)' : 'rgba(180,220,255,0.45)';
+  ctx.lineWidth=1.5; ctx.stroke();
+
+  if (Math.abs(ang)>0.44) {
+    const f=(Math.abs(ang)-0.44)/(Math.PI/2.8-0.44);
+    ctx.save(); ctx.globalAlpha=f*0.38+Math.sin(Date.now()/130)*0.10;
+    ctx.fillStyle='#ff2222';
+    ctx.beginPath(); ctx.arc(PIV.x,PIV.y,16,0,Math.PI*2); ctx.fill(); ctx.restore();
+  }
+}
+
+// ── READY sign + Mash A hint ──────────────────────────────────────────────────
+function drawReadySign() {
+  if (S!=='PLAYING' || dropInitiated || landed) return;
+  const balanced  = Math.abs(ang) < BAL_THRESH;
+  const signX     = BX;
+  const pips      = READY_THRESHOLD, filled = readyPresses;
+  const flashing  = aFlash > 0;
+
+  // ── "Mash A" key hint — always visible, flashes on keypress ─────────────────
+  const kw=28, kh=28, mashCY=82;
+  const keyX  = signX - 36;          // left edge of key box
+  const txtX  = keyX + kw + 9;       // text start x
+
+  ctx.save();
+  ctx.globalAlpha = flashing ? 1.0 : (balanced ? 0.82 : 0.32);
+  if (flashing) { ctx.shadowColor='#ffee44'; ctx.shadowBlur=20; }
+
+  // Key box
+  ctx.fillStyle   = flashing ? 'rgba(255,246,70,0.95)' : 'rgba(255,255,255,0.78)';
+  ctx.strokeStyle = flashing ? '#886600' : '#1a3870';
+  ctx.lineWidth   = 1.5;
+  rr(keyX, mashCY-kh/2, kw, kh, 6); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = flashing ? '#665500' : '#1a3870';
+  ctx.font = 'bold 15px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('A', keyX+kw/2, mashCY+5);
+
+  // "Mash A" label to the right
+  ctx.fillStyle = flashing ? '#554400' : '#1a3870';
+  ctx.font = 'bold 13px "Courier New"'; ctx.textAlign = 'left';
+  ctx.fillText('Mash A', txtX, mashCY+5);
+  ctx.restore();
+
+  // ── READY pill ───────────────────────────────────────────────────────────────
+  const signY = 118;
+  if (balanced) {
+    const pulse = 0.80+Math.sin(Date.now()/220)*0.20;
+    ctx.save(); ctx.globalAlpha=pulse;
+    ctx.shadowColor='#00ff88'; ctx.shadowBlur=38;
+    const pw=96,ph=34,pr=12;
+    ctx.fillStyle='rgba(8,170,72,0.94)';
+    rr(signX-pw/2,signY-ph/2,pw,ph,pr); ctx.fill();
+    ctx.fillStyle='#ffffff'; ctx.font='bold 17px "Courier New"';
+    ctx.textAlign='center'; ctx.fillText('READY',signX,signY+6); ctx.restore();
+  } else if (filled>0) {
+    ctx.save(); ctx.globalAlpha=0.28;
+    ctx.fillStyle='rgba(10,120,60,0.6)';
+    const pw=96,ph=34,pr=12;
+    rr(signX-pw/2,signY-ph/2,pw,ph,pr); ctx.fill();
+    ctx.fillStyle='#ccffdd'; ctx.font='bold 17px "Courier New"';
+    ctx.textAlign='center'; ctx.fillText('READY',signX,signY+6); ctx.restore();
+  }
+
+  // ── Charge pips ──────────────────────────────────────────────────────────────
+  const pipR=6, pipGap=18;
+  const totalW=pips*pipR*2+(pips-1)*(pipGap-pipR*2);
+  const pipStartX=signX-totalW/2+pipR;
+  const pipY=signY+26;
+  ctx.save(); ctx.globalAlpha=balanced?1.0:0.40;
+  for (let i=0;i<pips;i++) {
+    const px2=pipStartX+i*pipGap;
+    ctx.beginPath(); ctx.arc(px2,pipY,pipR,0,Math.PI*2);
+    if (i<filled) { ctx.fillStyle='#22dd88'; ctx.fill(); }
+    else { ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.fill(); ctx.strokeStyle='rgba(30,130,70,0.4)'; ctx.lineWidth=1.5; ctx.stroke(); }
+  }
+  ctx.restore();
+}
+
+// ── Vertical indicator ────────────────────────────────────────────────────────
+function drawIndicator() {
+  if (S!=='PLAYING' && S!=='RES') return;
+  const {cx,cy,hw,sw,nh} = IND;
+  const inZone = dropInitiated && roundTime>=SPACE_OPEN && roundTime<=SPACE_CLOSE;
+  const nhf = nh/(hw*2);
+
+  ctx.save();
+  ctx.globalAlpha = inZone ? 1.0 : 0.44;
+
+  // Outer frame — slightly frosted so it pops off the sky
+  ctx.fillStyle='rgba(255,255,255,0.30)';
+  ctx.fillRect(cx-sw/2-7, cy-hw-7, sw+14, hw*2+14);
+  ctx.strokeStyle='rgba(30,80,160,0.30)'; ctx.lineWidth=1;
+  ctx.strokeRect(cx-sw/2-7, cy-hw-7, sw+14, hw*2+14);
+
+  // Colour gradient track (top=red → centre=green → bottom=red)
+  const grd = ctx.createLinearGradient(0,cy-hw,0,cy+hw);
+  grd.addColorStop(0,         'rgba(150,30,30,0.72)');
+  grd.addColorStop(0.26,      'rgba(180,120,10,0.72)');
+  grd.addColorStop(0.5-nhf,   'rgba(20,100,20,0.72)');
+  grd.addColorStop(0.5,       'rgba(0,210,90,0.90)');
+  grd.addColorStop(0.5+nhf,   'rgba(20,100,20,0.72)');
+  grd.addColorStop(0.74,      'rgba(180,120,10,0.72)');
+  grd.addColorStop(1,         'rgba(150,30,30,0.72)');
+  ctx.fillStyle=grd;
+  ctx.fillRect(cx-sw/2, cy-hw, sw, hw*2);
+
+  // Sweet-spot green band
+  if (inZone) { ctx.save(); ctx.shadowColor='#00ee88'; ctx.shadowBlur=14; }
+  ctx.fillStyle='rgba(0,215,90,0.92)';
+  ctx.fillRect(cx-sw/2, cy-nh/2, sw, nh);
+  if (inZone) ctx.restore();
+
+  // Tick marks
+  for (let i=-4;i<=4;i++) {
+    ctx.fillStyle='rgba(255,255,255,0.10)';
+    ctx.fillRect(cx-sw/2+2, cy+i*(hw/4)-0.5, sw-4, 1);
+  }
+
+  // Needle — horizontal band moving up/down
+  const nw = sw+16;
+  ctx.fillStyle='rgba(255,255,255,0.92)';
+  ctx.fillRect(cx-nw/2, iy-2.5, nw, 5);
+  ctx.strokeStyle='#cc1010'; ctx.lineWidth=1.5;
+  ctx.strokeRect(cx-nw/2, iy-2.5, nw, 5);
+
+  // Needle arrowhead pointing right
+  ctx.fillStyle='#cc1010';
+  ctx.beginPath();
+  ctx.moveTo(cx+nw/2, iy-5); ctx.lineTo(cx+nw/2+7, iy); ctx.lineTo(cx+nw/2, iy+5);
+  ctx.closePath(); ctx.fill();
+
+  // "SPACE" label — sits above the track
+  ctx.globalAlpha = inZone ? 1.0 : 0.40;
+  ctx.fillStyle = inZone ? '#008844' : '#1a3c70';
+  ctx.font='bold 11px "Courier New"'; ctx.textAlign='center';
+  ctx.fillText('SPACE', cx, cy-hw-12);
+
+  ctx.restore();
+}
+
+// ── Data table ────────────────────────────────────────────────────────────────
+function drawTable() {
+  const {y,rh} = TBL;
+  const col0 = RIGHT_X + 6;          // left edge of row
+  const rowW = W - col0 - 6;         // row width
+  const midX = col0 + rowW / 2;
+  const barX = col0 + 38;            // bars start after row-number
+  const bw   = 40;                   // individual bar width
+  const bGap = 6;                    // gap between bars
+  const scoreX = W - 10;             // score & stars right-aligned
+
+  for (let i=0;i<10;i++) {
+    const ry = y + i*rh;
+    const dp = dpts[i], isNext = i === dpts.length;
+
+    // Row background
+    ctx.fillStyle = dp
+      ? (dp.ok ? 'rgba(20,110,40,0.14)' : 'rgba(150,20,20,0.11)')
+      : (isNext ? 'rgba(40,100,200,0.12)' : 'transparent');
+    ctx.fillRect(col0, ry, rowW, rh-1);
+    ctx.strokeStyle='rgba(30,80,160,0.14)'; ctx.lineWidth=0.5;
+    ctx.strokeRect(col0, ry, rowW, rh-1);
+
+    // Row number
+    txt(`#${i+1}`, col0+8, ry+rh/2+5, {size:13, col:'rgba(20,60,120,0.55)', bold:true});
+
+    if (dp) {
+      if (!dp.ok) {
+        ctx.strokeStyle='rgba(150,20,20,0.22)'; ctx.lineWidth=1;
+        ctx.beginPath(); ctx.moveTo(col0+4,ry+rh/2); ctx.lineTo(col0+rowW-4,ry+rh/2); ctx.stroke();
+        txt('VOID', midX, ry+rh/2+5, {size:13, col:'rgba(160,30,30,0.75)', align:'center', bold:true});
+      } else {
+        // B / R / L bars
+        [['B',dp.b],['R',dp.r],['L',dp.l]].forEach(([lbl,v],j)=>{
+          const bx = barX + j*(bw+bGap);
+          miniBar(bx, ry+8, bw, 10, v/100, qColor(v));
+          txt(lbl, bx+bw/2, ry+30, {size:9, col:'rgba(20,60,120,0.50)', align:'center'});
+        });
+        // Overall score
+        ctx.fillStyle=qColor(dp.ov); ctx.font='bold 16px "Courier New"'; ctx.textAlign='right';
+        ctx.fillText(`${Math.round(dp.ov)}%`, scoreX, ry+22);
+        // Stars
+        const stars=dp.ov>=82?'★★★':dp.ov>=65?'★★☆':dp.ov>=45?'★☆☆':'☆☆☆';
+        ctx.fillStyle=dp.ov>=65?'#b08010':'rgba(60,80,110,0.40)';
+        ctx.font='12px Arial'; ctx.textAlign='right';
+        ctx.fillText(stars, scoreX, ry+38);
+      }
+    } else if (isNext) {
+      ctx.fillStyle='rgba(40,100,200,0.28)'; ctx.font='bold 14px "Courier New"'; ctx.textAlign='center';
+      ctx.fillText('▶ next', midX, ry+rh/2+5);
+    }
+  }
+
+  // Footer count
+  const vc = dpts.filter(d=>d.ok).length;
+  txt(`${vc} / ${dpts.length} valid`, midX, y+10*rh+14, {size:11, col:'rgba(20,60,120,0.45)', align:'center'});
+}
+
+// ── A-press particles ─────────────────────────────────────────────────────────
+function drawPtcl() {
+  pts.forEach(p=>{
+    const a=p.t/p.mt;
+    ctx.globalAlpha=a*0.85; ctx.fillStyle=p.c;
+    ctx.beginPath(); ctx.arc(p.x,p.y,p.sz*(0.4+a*0.6),0,Math.PI*2); ctx.fill();
+  });
+  ctx.globalAlpha=1;
+}
+
+// ── Result overlay ────────────────────────────────────────────────────────────
+function drawResOverlay() {
+  const dp=dpts[dpts.length-1];
+  const ox=LEFT_W+14, ow=RIGHT_X-LEFT_W-28;
+  ctx.fillStyle=dp.ok?'rgba(18,128,48,0.92)':'rgba(148,28,28,0.92)';
+  ctx.fillRect(ox,H/2-62,ow,124);
+  ctx.fillStyle='#ffffff'; ctx.font='bold 18px "Courier New"'; ctx.textAlign='center';
+  ctx.fillText(dp.ok?'DATA RECORDED':'DATA THROWN OUT',ox+ow/2,H/2-30);
+  if (dp.ok) {
+    ctx.font='12px "Courier New"';
+    ctx.fillText(`${Math.round(dp.ov)}%  ·  B:${Math.round(dp.b)}  R:${Math.round(dp.r)}  L:${Math.round(dp.l)}`,ox+ow/2,H/2+6);
+    const stars=dp.ov>=82?'★★★':dp.ov>=65?'★★☆':dp.ov>=45?'★☆☆':'☆☆☆';
+    ctx.font='24px Arial'; ctx.fillText(stars,ox+ow/2,H/2+44);
+  } else {
+    const why=[];
+    if (dp.b<15) why.push('Balance'); if (dp.r<15) why.push('Release'); if (dp.l<15) why.push('Landing');
+    ctx.font='11px "Courier New"';
+    ctx.fillText(why.length?`Too poor: ${why.join(', ')}`:'Overall too low',ox+ow/2,H/2+10);
+  }
+}
+
+// ── GAME screen ───────────────────────────────────────────────────────────────
+function drawGame() {
+  ctx.clearRect(0,0,W,H);
+  drawBg(); drawRuler(); drawDropZone();
+  drawBottle(BX, S==='RES' ? BY1 : by);
+  drawSparks(); drawReadySign(); drawStick();
+  drawIndicator(); drawTable(); drawPtcl();
+
+  if (earlyFlash>0) {
+    ctx.save(); ctx.globalAlpha=(earlyFlash/0.28)*0.18;
+    ctx.fillStyle='#cc0000'; ctx.fillRect(0,0,W,H); ctx.restore();
+  }
+  if (S==='RES') drawResOverlay();
+}
+
+// ── INTRO screen ──────────────────────────────────────────────────────────────
+function drawIntro() {
+  // Sky + ground matching the game screen
+  const skyG=ctx.createLinearGradient(0,0,0,GY);
+  skyG.addColorStop(0,'#6ea8d8'); skyG.addColorStop(1,'#c0dff5');
+  ctx.fillStyle=skyG; ctx.fillRect(0,0,W,GY);
+  ctx.fillStyle='#6a481a'; ctx.fillRect(0,GY,W,H-GY);
+  ctx.fillStyle='#987028'; ctx.fillRect(0,GY,W,3);
+
+  ctx.save(); ctx.shadowColor='#1a4a90'; ctx.shadowBlur=18;
+  txt('DATADROP',W/2,100,{size:54,col:'#1a4a90',align:'center',bold:true}); ctx.restore();
+  txt('Scientific Data Collection Simulator',W/2,124,{size:13,col:'#1a3c70',align:'center'});
+
+  // Decorative bottle centred
+  ctx.save();
+  ctx.translate(W/2-2, 210);
+  const mc=0, mb=34;
+  const wh2=(WATER_PCT/100)*(BH-7);
+  ctx.save(); rr(mc-BW/2+2,mb-BH+2,BW-4,BH-4,5); ctx.clip();
+  ctx.fillStyle=BOTTLE_COLOR+'99'; ctx.fillRect(mc-BW/2+2,mb-2-wh2,BW-4,wh2); ctx.restore();
+  ctx.lineWidth=2; ctx.strokeStyle=BOTTLE_COLOR; ctx.fillStyle='rgba(210,235,255,0.14)';
+  rr(mc-BW/2,mb-BH,BW,BH,7); ctx.fill(); ctx.stroke();
+  ctx.fillStyle='rgba(210,235,255,0.12)'; ctx.strokeStyle=BOTTLE_COLOR; ctx.lineWidth=1.5;
+  ctx.fillRect(mc-NW/2,mb-BH-NH,NW,NH); ctx.strokeRect(mc-NW/2,mb-BH-NH,NW,NH);
+  ctx.fillStyle=BOTTLE_CAP; rr(mc-CW/2,mb-BH-NH-CH,CW,CH,3); ctx.fill();
+  ctx.restore();
+
+  const ctrls=[['← →','Balance the meterstick'],['A','Mash to release the bottle'],['SPACE','Time the landing']];
+  ctrls.forEach(([k,d],i)=>{
+    const cy2=288+i*46;
+    if (k==='← →') {
+      ['←','→'].forEach((arrow,ai)=>{
+        const kx=W/2-158+ai*37;
+        ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.strokeStyle='#2a5090'; ctx.lineWidth=1.5;
+        ctx.fillRect(kx,cy2-17,30,28); ctx.strokeRect(kx,cy2-17,30,28);
+        ctx.font='bold 16px Arial'; ctx.textAlign='center'; ctx.fillStyle='#1a3870';
+        ctx.fillText(arrow,kx+15,cy2+5);
+      });
+    } else {
+      const kw=k==='SPACE'?68:36;
+      ctx.fillStyle='rgba(255,255,255,0.55)'; ctx.strokeStyle='#2a5090'; ctx.lineWidth=1.5;
+      ctx.fillRect(W/2-158,cy2-17,kw,28); ctx.strokeRect(W/2-158,cy2-17,kw,28);
+      txt(k,W/2-158+kw/2,cy2+4,{size:12,col:'#1a3870',align:'center',bold:true});
+    }
+    txt(d,W/2-74,cy2+4,{size:12,col:'#1a3c70'});
+  });
+
+  txt('The bottle only falls while the stick is balanced.',W/2,434,{size:11,col:'#1a3060',align:'center'});
+  txt('Balance ← →  ·  mash A  ·  tap SPACE at the right moment.',W/2,450,{size:10,col:'#1a3060',align:'center'});
+  if (Date.now()%1100<620) txt('PRESS SPACE TO BEGIN',W/2,484,{size:14,col:'#1a4a90',align:'center',bold:true});
+}
+
+// ── DONE screen ───────────────────────────────────────────────────────────────
+function drawDone() {
+  // Sky + ground matching the game screen
+  const skyG=ctx.createLinearGradient(0,0,0,GY);
+  skyG.addColorStop(0,'#6ea8d8'); skyG.addColorStop(1,'#c0dff5');
+  ctx.fillStyle=skyG; ctx.fillRect(0,0,W,GY);
+  ctx.fillStyle='#6a481a'; ctx.fillRect(0,GY,W,H-GY);
+  ctx.fillStyle='#987028'; ctx.fillRect(0,GY,W,3);
+
+  const vld=dpts.filter(d=>d.ok);
+  const avg=vld.length?vld.reduce((s,d)=>s+d.ov,0)/vld.length:0;
+
+  ctx.save(); ctx.shadowColor='#1a4a90'; ctx.shadowBlur=10;
+  txt('EXPERIMENT COMPLETE',W/2,96,{size:28,col:'#1a4a90',align:'center',bold:true}); ctx.restore();
+  txt(`Valid samples: ${vld.length} / 10   Average: ${avg.toFixed(1)}%`,W/2,130,{size:14,col:'#1a3c70',align:'center'});
+
+  dpts.forEach((dp,i)=>{
+    const rx=W/2-163+(i%5)*66, ry=i<5?170:236;
+    ctx.fillStyle=dp.ok?qColor(dp.ov):'rgba(180,200,220,0.55)';
+    ctx.fillRect(rx,ry,60,32);
+    ctx.fillStyle=dp.ok?'#fff':'rgba(40,60,100,0.45)';
+    ctx.font='bold 11px "Courier New"'; ctx.textAlign='center';
+    ctx.fillText(dp.ok?`${Math.round(dp.ov)}%`:'VOID',rx+30,ry+21);
+  });
+
+  const grade=avg>=82?'A':avg>=65?'B':avg>=45?'C':avg>=25?'D':'F';
+  ctx.save(); ctx.shadowColor='#a07800'; ctx.shadowBlur=12;
+  txt(grade,W/2,358,{size:68,col:'#7a5800',align:'center',bold:true}); ctx.restore();
+  txt(avg>=82?'Outstanding data!':avg>=65?'Good collection.':avg>=45?'Acceptable results.':avg>=25?'Needs improvement.':'Poor data quality.',W/2,388,{size:13,col:'#1a3c70',align:'center'});
+
+  if (Date.now()%1100<620) txt('PRESS SPACE TO PLAY AGAIN',W/2,456,{size:14,col:'#1a4a90',align:'center',bold:true});
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+function frame(ts) {
+  const dt=Math.min((ts-lastTs)/1000,0.05);
+  lastTs=ts;
+  update(dt);
+  if      (S==='INTRO') drawIntro();
+  else if (S==='DONE')  drawDone();
+  else                  drawGame();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(ts=>{ lastTs=ts; requestAnimationFrame(frame); });
+</script>
+</body>
+</html>
