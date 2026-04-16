@@ -1,0 +1,1151 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bottle Drop Sim 2</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: linear-gradient(180deg, #2d4a6e 0%, #1e3550 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 8px;
+}
+
+/* Embed shell: fits common iframe 850×540 */
+#app {
+  max-width: 850px;
+  max-height: 540px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  padding: 8px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background: #243a52;
+  border-radius: 16px;
+  border: 2px solid rgba(255,255,255,0.12);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.25);
+}
+
+/* Stage: top row + overlapped drop control */
+#main-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+#top-row {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr) 140px;
+  /* Bottom band: side panels extend here; Drop overlaps center above this band */
+  grid-template-rows: minmax(0, 1fr) 32px;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+#sim-wrap {
+  grid-column: 2;
+  grid-row: 1 / -1;
+  align-self: stretch;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  /* Reserve smaller center buffer; keep room for Drop + result text strip */
+  padding-bottom: calc(24px + 6px);
+}
+
+canvas#sim {
+  border-radius: 12px;
+  border: 2px solid rgba(255,255,255,0.2);
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  aspect-ratio: 680 / 520;
+  touch-action: none;
+  cursor: grab;
+  flex-shrink: 0;
+}
+canvas#sim.dragging { cursor: grabbing; }
+
+/* ── Drop control: anchored to center column, inset from canvas column right edge ── */
+#btns {
+  position: absolute;
+  right: 5%;
+  bottom: 14px;
+  z-index: 20;
+  display: flex;
+  gap: 0;
+  justify-content: flex-end;
+  align-items: center;
+  pointer-events: none;
+}
+#fallResult {
+  position: absolute;
+  left: 50%;
+  bottom: 2px;
+  transform: translateX(-50%);
+  min-height: 14px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(255,255,255,0.18);
+  background: rgba(18, 31, 49, 0.82);
+  color: rgba(232,244,255,0.92);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+#fallResult.show { opacity: 1; }
+#btns button {
+  pointer-events: auto;
+  padding: 0 20px;
+  min-height: 44px;
+  border: none;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 0.95rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: transform 0.1s, background 0.15s, box-shadow 0.15s;
+}
+#btns button:active:not(:disabled) { transform: scale(0.97); }
+/* Two IDs beat `#btns button` so min-height/border-radius aren’t forced to 44px / 10px — true circle */
+#btns #dropBtn {
+  width: 86px;
+  min-width: 86px;
+  height: 86px;
+  min-height: 86px;
+  max-height: 86px;
+  padding: 0;
+  border-radius: 50%;
+  aspect-ratio: 1;
+  background: linear-gradient(180deg, #3d8dff 0%, #2563d4 100%);
+  color: #fff;
+  box-shadow: 0 3px 0 #1a4a9e;
+}
+#btns #dropBtn:hover:not(:disabled) { background: linear-gradient(180deg, #5aa0ff 0%, #3478e8 100%); }
+#btns #dropBtn.reset-mode { background: linear-gradient(180deg, #ffcf8a 0%, #e89a40 100%); color: #5a2e00; box-shadow: 0 3px 0 #b86820; }
+#btns #dropBtn.reset-mode:hover:not(:disabled) { background: linear-gradient(180deg, #ffd9a0 0%, #f0aa55 100%); }
+#btns #dropBtn:disabled {
+  background: #3a4d63;
+  color: rgba(255,255,255,0.35);
+  box-shadow: none;
+  cursor: default;
+}
+/* ── air density panel ── */
+#airPanel {
+  grid-column: 3;
+  grid-row: 1 / -1;
+  align-self: stretch;
+  display: flex;
+  background: rgba(20, 35, 55, 0.98);
+  border: 2px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  padding: 10px 14px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  width: 140px;
+  flex-shrink: 0;
+}
+#airPanelHeader {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+#airPanelTitle { font-size: 13px; font-weight: 700; color: rgba(255,255,255,0.7); }
+#rhoVal { font-family: ui-monospace, monospace; font-size: 13px; font-weight: 700; color: #e8f4ff; }
+#airControl {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
+}
+#airScale {
+  position: relative;
+  flex: 0 0 42px;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+#rhoSlider {
+  cursor: pointer;
+  accent-color: #7ee8a8;
+  width: 26px;
+  min-width: 26px;
+  height: 220px;
+  max-height: 100%;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  margin: 0;
+}
+#airWorlds {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+.air-world {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  width: 70px;
+  min-height: 70px;
+  aspect-ratio: 1 / 1;
+  padding: 5px;
+  align-self: center;
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 9px;
+  background: rgba(255,255,255,0.04);
+  color: rgba(226,236,255,0.55);
+  cursor: pointer;
+  transition: border-color 0.15s, box-shadow 0.15s, color 0.15s, opacity 0.15s;
+}
+.air-world svg {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+}
+.air-world .meta {
+  display: block;
+  text-align: center;
+  line-height: 1;
+}
+.air-world .name {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.air-world.active {
+  border-color: rgba(126,232,168,0.95);
+  box-shadow: 0 0 0 1px rgba(126,232,168,0.2), 0 0 9px rgba(126,232,168,0.25);
+  background: rgba(126,232,168,0.1);
+  color: #e9fff3;
+}
+.air-world:not(.active) { opacity: 0.45; }
+
+/* ── object panel ── */
+#objectPanel {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  align-self: stretch;
+  display: flex;
+  background: rgba(20, 35, 55, 0.98);
+  border: 2px solid rgba(255,255,255,0.12);
+  border-radius: 12px;
+  padding: 10px 8px 12px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  width: 160px;
+  flex-shrink: 0;
+}
+#objectPanelTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: rgba(255,255,255,0.72);
+  text-align: center;
+}
+#objGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 2px;
+}
+.obj-choice {
+  width: 100%;
+  min-height: 46px;
+  border-radius: 10px;
+  border: 2px solid rgba(255,255,255,0.1);
+  padding: 6px 8px;
+  background: #2a4055;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  letter-spacing: 0;
+  transition: background 0.15s;
+}
+.obj-choice:hover { background: #355a6a; }
+.obj-choice.selected { background: #2a4055; border-color: rgba(255,255,255,0.1); color: rgba(232,244,255,0.92); }
+.obj-thumb {
+  display: block;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  pointer-events: none;
+  border-radius: 8px;
+}
+.obj-label {
+  font-size: 10px;
+  font-weight: 700;
+  color: rgba(232,244,255,0.92);
+  text-align: left;
+  line-height: 1.2;
+  text-transform: uppercase;
+  display: block;
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
+}
+</style>
+</head>
+<body>
+
+<div id="app">
+<div id="main-stage">
+<div id="top-row">
+  <div id="objectPanel">
+    <div id="objectPanelTitle">Objects</div>
+    <div id="objGrid" style="pointer-events:none;">
+      <button type="button" class="obj-choice" data-type="bottle" data-water="100" title="bottle (full)" aria-label="bottle full">
+        <canvas class="obj-thumb" width="52" height="52" aria-hidden="true"></canvas><span class="obj-label">bottle (full)</span>
+      </button>
+      <button type="button" class="obj-choice" data-type="bottle" data-water="10" title="bottle (partial)" aria-label="bottle partial">
+        <canvas class="obj-thumb" width="52" height="52" aria-hidden="true"></canvas><span class="obj-label">bottle (partial)</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="sim-wrap">
+    <canvas id="sim" width="680" height="520"></canvas>
+    <div id="btns">
+      <button type="button" id="dropBtn">Drop</button>
+    </div>
+    <div id="fallResult" aria-live="polite"></div>
+  </div>
+
+  <div id="airPanel" style="opacity:0.45;pointer-events:none;user-select:none;">
+    <div id="airPanelHeader">
+      <span id="airPanelTitle">Air density</span>
+      <span id="rhoVal">1.225 kg/m³</span>
+    </div>
+    <div id="airControl">
+      <div id="airScale">
+        <input type="range" id="rhoSlider" min="0" max="4" step="0.025" value="1.225" orient="vertical">
+      </div>
+      <div id="airWorlds">
+        <div class="air-world" data-world="titan">
+          <svg viewBox="0 0 24 24" role="img" aria-label="Titan icon">
+            <circle cx="10.5" cy="13" r="5.2" fill="#d49b62"/>
+            <ellipse cx="10.5" cy="13" rx="8.5" ry="2.1" fill="none" stroke="#b8793a" stroke-width="1.4"/>
+            <circle cx="18.2" cy="6.8" r="3.4" fill="#f2d188"/>
+            <path d="M14.5 6.8c1.4-1.3 2.8-1.9 4.4-1.9" stroke="#f7e0a6" stroke-width="1" fill="none" opacity="0.85"/>
+          </svg>
+          <span class="meta"><span class="name">Titan</span></span>
+        </div>
+        <div class="air-world active" data-world="earth">
+          <svg viewBox="0 0 24 24" role="img" aria-label="Earth icon">
+            <circle cx="12" cy="12" r="9" fill="#3c9cff"/>
+            <path d="M7.8 8.4c1.3-.7 2.6-.8 3.8.2 1.1.9 1.5 2.1 2.8 2.3 1.6.2 2.8-.6 3.3-1.8.4 1.8-.2 3.5-1.4 4.6-1 .9-2.2 1.3-3.4 1-.8-.2-1.5-.8-2.2-1.1-1.1-.5-2.4-.4-3.2.2-.9-1.4-.8-3.3.3-5.4z" fill="#6ce08f"/>
+            <path d="M8.1 15.2c1-.4 2.1-.2 3 .3.8.5 1.8.7 2.6.4-.7 1.3-2.1 2.2-3.8 2.2-1 0-1.9-.3-2.7-.8.2-.8.5-1.5.9-2.1z" fill="#6ce08f"/>
+          </svg>
+          <span class="meta"><span class="name">Earth</span></span>
+        </div>
+        <div class="air-world" data-world="moon">
+          <svg viewBox="0 0 24 24" role="img" aria-label="Moon icon">
+            <circle cx="12" cy="12" r="9" fill="#e9eef9"/>
+            <circle cx="15.7" cy="9.4" r="1.3" fill="#c7cedf"/>
+            <circle cx="9.2" cy="13.8" r="1.6" fill="#c7cedf"/>
+            <circle cx="14.1" cy="16.5" r="1.1" fill="#c7cedf"/>
+          </svg>
+          <span class="meta"><span class="name">Moon</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+</div>
+
+<script>
+const cv = document.getElementById('sim');
+let ctx = cv.getContext('2d');
+
+function runWithContext(c, fn) {
+  const prev = ctx;
+  ctx = c;
+  try { fn(); } finally { ctx = prev; }
+}
+
+/* ── layout constants (internal canvas pixels) ── */
+const W = 680, H = 520, GY = 482;
+const PPM = 15;
+const MAX_H = 30, MIN_H = 1;
+const BW0 = 40, BH0 = 46, NW0 = 18, NH0 = 14, CW0 = 22, CH0 = 7;
+let BW = BW0, BH = BH0, NW = NW0, NH = NH0, CW = CW0, CH = CH0, TH = BH0 + NH0 + CH0;
+
+function updateBottleScale() {
+  const s = 0.45;
+  BW = Math.round(BW0 * s);
+  BH = Math.round(BH0 * s);
+  NW = Math.round(NW0 * s);
+  NH = Math.round(NH0 * s);
+  CW = Math.round(CW0 * s);
+  CH = Math.max(1, Math.round(CH0 * s));
+  TH = BH + NH + CH;
+}
+
+/* ─────────────────────────────────────────────
+   PHYSICS CONSTANTS
+   ───────────────────────────────────────────── */
+const g          = 9.8;
+const RHO_EARTH  = 1.225;
+let   RHO        = RHO_EARTH;
+const C_D        = 0.9;
+const DIAM       = 0.06;
+const A          = Math.PI * (DIAM / 2) ** 2;
+
+const MASS_EMPTY = 0.030;
+const MASS_WATER = 0.500;
+
+const SIM_DT = 1 / 480;
+
+const OBJECT_TYPES = {
+  bottle: { name: 'bottle', fixedMass: null, cdA: C_D * A },
+};
+
+const BOTTLES = [
+  {cx: 220, h: 5.0, water: 100, color: '#4a90f0', cap: '#1a60c0', type: 'bottle',
+   bottomY: 0, vy: 0, fallen: 0,
+   landed: false, landTime: null, sparks: [], shattered: false},
+  {cx: 460, h: 5.0, water: 10, color: '#e07030', cap: '#b04010', type: 'bottle',
+   bottomY: 0, vy: 0, fallen: 0,
+   landed: false, landTime: null, sparks: [], shattered: false}
+];
+
+let state = 'idle', t0 = null, elapsed = 0, raf = null, prevTs = null;
+let selectedIdx = null;
+let dragIdx = null;
+const FALL_RESET_UNLOCK_DELAY_MS = 2000;
+let fallResetUnlocked = false;
+let fallResetTimer = null;
+const dropBtn = document.getElementById('dropBtn');
+const fallResultEl = document.getElementById('fallResult');
+
+function clearFallResult() {
+  fallResultEl.textContent = '';
+  fallResultEl.classList.remove('show');
+}
+
+function getResultObjectLabel(b) {
+  if (b.type === 'bottle') {
+    return (b.water >= 50 ? 'bottle (full)' : 'bottle (partial)').toLowerCase();
+  }
+  return String(OBJECT_TYPES[b.type]?.name || b.type).toLowerCase();
+}
+
+function getResultColorLabel(b) {
+  const c = String(b.color || '').toLowerCase();
+  if (c === '#4a90f0') return 'blue';
+  if (c === '#e07030') return 'orange';
+  return b.cx <= (W / 2) ? 'blue' : 'orange';
+}
+
+function roundToTenth(t) {
+  return Math.round(t * 10) / 10;
+}
+
+function showFirstTouchResult() {
+  const landed = BOTTLES.filter(b => b.landTime !== null);
+  if (landed.length === 0) return;
+  const ranked = landed.slice().sort((a, b) => a.landTime - b.landTime);
+  const side = ranked[0].cx <= W / 2 ? 'left' : 'right';
+  let message = `The ${side} object landed first.`;
+  if (ranked.length >= 2 && roundToTenth(ranked[0].landTime) === roundToTenth(ranked[1].landTime)) {
+    message = 'Both objects landed at the same time.';
+  }
+  fallResultEl.textContent = message;
+  fallResultEl.classList.add('show');
+}
+
+function clearFallResetUnlockTimer() {
+  if (fallResetTimer !== null) {
+    clearTimeout(fallResetTimer);
+    fallResetTimer = null;
+  }
+}
+
+function resetFallResetUnlockState() {
+  fallResetUnlocked = false;
+  clearFallResetUnlockTimer();
+}
+
+function scheduleFallResetUnlock() {
+  clearFallResetUnlockTimer();
+  fallResetTimer = setTimeout(() => {
+    fallResetTimer = null;
+    if (state !== 'falling') return;
+    fallResetUnlocked = true;
+    syncActionButton();
+  }, FALL_RESET_UNLOCK_DELAY_MS);
+}
+
+function syncActionButton() {
+  if (state === 'falling') {
+    dropBtn.textContent = fallResetUnlocked ? 'Reset' : 'Drop';
+    dropBtn.disabled = !fallResetUnlocked;
+    dropBtn.classList.toggle('reset-mode', fallResetUnlocked);
+  } else if (state === 'done') {
+    dropBtn.textContent = 'Reset';
+    dropBtn.disabled = false;
+    dropBtn.classList.add('reset-mode');
+  } else {
+    dropBtn.textContent = 'Drop';
+    dropBtn.disabled = false;
+    dropBtn.classList.remove('reset-mode');
+  }
+}
+
+function isSetupState() {
+  return state === 'idle' || state === 'done';
+}
+
+const AIR_DOT_MAX = 600;
+const airDots = Array.from({length: AIR_DOT_MAX}, () => ({
+  x:     Math.random() * W,
+  y:     Math.random() * GY,
+  r:     0.9 + Math.random() * 1.4,
+  speed: 0.25 + Math.random() * 0.9,
+  px:    Math.random() * Math.PI * 2,
+  py:    Math.random() * Math.PI * 2,
+  ax:    5 + Math.random() * 7,
+  ay:    4 + Math.random() * 6,
+}));
+
+function bottleMass(b) {
+  const ot = OBJECT_TYPES[b.type];
+  if (ot.fixedMass !== null) return ot.fixedMass;
+  return MASS_EMPTY + (b.water / 100) * MASS_WATER;
+}
+
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r); ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h); ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r); ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function init() {
+  resetFallResetUnlockState();
+  clearFallResult();
+  for (const b of BOTTLES) {
+    b.bottomY = GY - b.h * PPM;
+    b.vy      = 0;
+    b.fallen  = 0;
+    b.landed  = false;
+    b.landTime = null;
+    b.sparks  = [];
+    b.shattered = false;
+  }
+  elapsed = 0;
+}
+
+function clientToCanvas(ev) {
+  const r = cv.getBoundingClientRect();
+  const sx = W / r.width;
+  const sy = H / r.height;
+  return {
+    mx: (ev.clientX - r.left) * sx,
+    my: (ev.clientY - r.top) * sy,
+  };
+}
+
+function hitHalfWidth(b) {
+  return Math.max(26, BW * 0.52);
+}
+
+function hitTestBottle(mx, my) {
+  for (let i = 0; i < BOTTLES.length; i++) {
+    const b = BOTTLES[i];
+    const top = objTopY(b) - 6;
+    const bot = b.bottomY + 8;
+    const hw = hitHalfWidth(b) + 10;
+    if (mx >= b.cx - hw && mx <= b.cx + hw && my >= top && my <= bot) return i;
+  }
+  return -1;
+}
+
+function applyCanvasYToHeight(b, canvasY) {
+  const yMin = GY - MAX_H * PPM;
+  const yMax = GY;
+  let bottomY = Math.max(yMin, Math.min(yMax, canvasY));
+  let h = (GY - bottomY) / PPM;
+  h = Math.max(MIN_H, Math.min(MAX_H, Math.round(h * 2) / 2));
+  b.h = h;
+  b.bottomY = GY - b.h * PPM;
+}
+
+function drawBg() {
+  const skyTop = '#c5e8ff';
+  const skyBot = '#9dd0f5';
+  const grd = ctx.createLinearGradient(0, 0, 0, GY);
+  grd.addColorStop(0, skyTop);
+  grd.addColorStop(1, skyBot);
+  ctx.fillStyle = grd;
+  ctx.fillRect(0, 0, W, GY);
+
+  // sunlight glow — top-left radial wash
+  const sunGrd = ctx.createRadialGradient(0, 0, 0, 0, 0, 320);
+  sunGrd.addColorStop(0,   'rgba(255,240,140,0.28)');
+  sunGrd.addColorStop(0.5, 'rgba(255,220,80,0.10)');
+  sunGrd.addColorStop(1,   'rgba(255,200,60,0)');
+  ctx.fillStyle = sunGrd;
+  ctx.fillRect(0, 0, W, GY);
+
+  // clouds — static, near top, biased to the right
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.52)';
+  function drawCloud(cx, cy, scale) {
+    const puffs = [
+      [0,    0,    scale * 22],
+      [-28,  8,    scale * 15],
+      [ 28,  8,    scale * 15],
+      [-14,  -6,   scale * 16],
+      [ 14,  -6,   scale * 16],
+    ];
+    for (const [dx, dy, r] of puffs) {
+      ctx.beginPath();
+      ctx.arc(cx + dx * scale, cy + dy * scale, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  drawCloud(540, 38, 1.0);
+  drawCloud(610, 60, 0.70);
+  drawCloud(480, 72, 0.55);
+  ctx.restore();
+
+  ctx.strokeStyle = 'rgba(0,90,180,0.07)'; ctx.lineWidth = 1;
+  const gridStep = 5;
+  for (let m = gridStep; m <= 30; m += gridStep) {
+    const y = GY - m * PPM; if (y < 0) break;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+  // concrete fill
+  const groundGrd = ctx.createLinearGradient(0, GY, 0, H);
+  groundGrd.addColorStop(0, '#a0a8b0');
+  groundGrd.addColorStop(1, '#7a8088');
+  ctx.fillStyle = groundGrd;
+  ctx.fillRect(0, GY, W, H - GY);
+
+  // surface highlight seam
+  ctx.fillStyle = '#b8c0c8';
+  ctx.fillRect(0, GY, W, 3);
+
+  // concrete texture: faint panel cracks
+  ctx.save();
+  ctx.strokeStyle = 'rgba(90,98,108,0.45)';
+  ctx.lineWidth = 1;
+  const panelW = 80;
+  for (let x = panelW; x < W; x += panelW) {
+    ctx.beginPath(); ctx.moveTo(x, GY); ctx.lineTo(x, H); ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(90,98,108,0.3)';
+  ctx.beginPath(); ctx.moveTo(0, GY + 12); ctx.lineTo(W, GY + 12); ctx.stroke();
+  ctx.restore();
+}
+
+function drawRuler() {
+  const tickStep = 5;
+  const maxM = 30;
+  ctx.textAlign = 'right';
+  for (let m = 0; m <= maxM; m += tickStep) {
+    const y = GY - m * PPM; if (y < 0) break;
+    ctx.strokeStyle = 'rgba(20,80,140,0.55)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.moveTo(46, y); ctx.lineTo(57, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(15,65,120,0.85)'; ctx.font = 'bold 11px system-ui, sans-serif';
+    ctx.fillText(m + ' m', 44, y + 4);
+  }
+  ctx.strokeStyle = 'rgba(15,55,130,0.2)'; ctx.lineWidth = 0.8;
+  ctx.beginPath(); ctx.moveTo(57, GY); ctx.lineTo(57, GY - maxM * PPM); ctx.stroke();
+}
+
+function drawShadow(b, baseR) {
+  const dist = Math.max(0, GY - b.bottomY);
+  const sp = 1 - Math.min(1, dist / Math.max(1, b.h * PPM));
+  ctx.save(); ctx.globalAlpha = .06 + .22 * sp; ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.ellipse(b.cx, GY + 2, baseR * (.5 + .7 * sp), 4, 0, 0, Math.PI * 2);
+  ctx.fill(); ctx.restore();
+}
+
+function drawBadge(b, topY) {
+  if (b.landTime === null) return;
+  const badgeY = b.shattered ? GY - 20 : topY - 10;
+  ctx.save(); ctx.fillStyle = 'rgba(255,252,235,0.98)'; ctx.strokeStyle = b.color; ctx.lineWidth = 2;
+  rr(b.cx - 34, badgeY - 16, 68, 24, 8); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#3a2800'; ctx.font = 'bold 12px ui-monospace, monospace'; ctx.textAlign = 'center';
+  ctx.fillText(b.landTime.toFixed(1) + ' s', b.cx, badgeY + 1); ctx.restore();
+}
+
+function drawIdleLine(b) {
+  if (state !== 'idle') return;
+  ctx.save(); ctx.setLineDash([8, 6]); ctx.strokeStyle = b.color + '55'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(64, b.bottomY); ctx.lineTo(W - 8, b.bottomY); ctx.stroke(); ctx.restore();
+}
+
+function objTopY(b) {
+  return b.bottomY - TH;
+}
+
+function drawSelectHighlight(b) {
+  const padT = 8, padB = 10, padX = 12;
+  const top = objTopY(b) - padT;
+  const bot = b.bottomY + padB;
+  const hw = hitHalfWidth(b) + padX;
+  const left = b.cx - hw;
+  const rw = hw * 2;
+  const rh = bot - top;
+  ctx.save();
+  ctx.shadowColor = b.color;
+  ctx.shadowBlur = 16;
+  ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+  ctx.lineWidth = 3;
+  rr(left, top, rw, rh, 14);
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.strokeStyle = b.color;
+  ctx.lineWidth = 2;
+  rr(left + 2, top + 2, rw - 4, rh - 4, 12);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHeightReadout(b) {
+  const label = b.h.toFixed(1) + ' m up';
+  ctx.save();
+  ctx.font = 'bold 13px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.strokeText(label, b.cx, b.bottomY + 22);
+  ctx.fillStyle = 'rgba(30,50,80,0.95)';
+  ctx.fillText(label, b.cx, b.bottomY + 22);
+  ctx.restore();
+}
+
+function drawBottleShape(b) {
+  const cx = b.cx, by = b.bottomY;
+  const bT = by - BH, nT = bT - NH, cT = nT - CH;
+  const wh = (b.water / 100) * (BH - 7);
+  if (wh > 0) {
+    ctx.save(); rr(cx - BW / 2 + 2, bT + 2, BW - 4, BH - 4, 5); ctx.clip();
+    ctx.fillStyle = b.color + '99';
+    ctx.fillRect(cx - BW / 2 + 2, by - 2 - wh, BW - 4, wh);
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(cx - BW / 2 + 5, by - 2 - wh); ctx.lineTo(cx + BW / 2 - 5, by - 2 - wh); ctx.stroke();
+    ctx.restore();
+  }
+  ctx.lineWidth = 2; ctx.strokeStyle = b.color; ctx.fillStyle = 'rgba(210,235,255,0.14)';
+  rr(cx - BW / 2, bT, BW, BH, 7); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = 'rgba(210,235,255,0.12)'; ctx.strokeStyle = b.color; ctx.lineWidth = 1.5;
+  ctx.fillRect(cx - NW / 2, nT, NW, NH); ctx.strokeRect(cx - NW / 2, nT, NW, NH);
+  ctx.fillStyle = b.cap; rr(cx - CW / 2, cT, CW, CH, 3); ctx.fill();
+  ctx.save(); rr(cx - BW / 2 + 1, bT + 1, BW - 2, BH - 2, 6); ctx.clip();
+  ctx.fillStyle = 'rgba(255,255,255,0.2)'; rr(cx - BW / 2 + 4, bT + 6, 6, BH - 12, 3); ctx.fill(); ctx.restore();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+function drawAirDensity() {
+  const frac   = Math.min(1, RHO / 4.0);
+  const count  = Math.round(frac * AIR_DOT_MAX);
+  const t      = performance.now() * 0.001;
+
+  ctx.save();
+
+  ctx.fillStyle = `rgba(140,175,215,${frac * 0.13})`;
+  ctx.fillRect(0, 0, W, GY);
+
+  ctx.fillStyle = `rgba(80,120,175,${0.18 + frac * 0.28})`;
+  for (let i = 0; i < count; i++) {
+    const d = airDots[i];
+    const x = (d.x + Math.sin(t * d.speed + d.px) * d.ax + W) % W;
+    const y = (d.y + Math.cos(t * d.speed * 0.75 + d.py) * d.ay + GY) % GY;
+    ctx.beginPath(); ctx.arc(x, y, d.r, 0, Math.PI * 2); ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawObject(b) {
+  drawShadow(b, BW * 0.5);
+  drawBottleShape(b);
+  if (b.landed) drawBadge(b, objTopY(b));
+  drawIdleLine(b);
+}
+
+function objectThumbLayoutScale() { return 0.55; }
+
+function drawObjectThumbShape(b) { drawBottleShape(b); }
+
+function refreshObjectChoiceThumbs() {
+  document.querySelectorAll('.obj-choice canvas.obj-thumb').forEach((canvas) => {
+    const btn = canvas.closest('button');
+    if (!btn) return;
+    const btnType = btn.dataset.type;
+    const type = btnType === 'surprise' ? 'surprise' : btnType;
+    const preset = parseFloat(btn.dataset.water);
+    const water = type === 'bottle' && Number.isFinite(preset) ? preset : BOTTLES[0].water;
+    const pseudo = {
+      type,
+      water,
+      color: BOTTLES[0].color,
+      cap: BOTTLES[0].cap,
+      cx: 0,
+      bottomY: 0,
+      shattered: false,
+      landed: false,
+    };
+
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    const cssW = Math.max(28, Math.round(rect.width));
+    const cssH = Math.max(28, Math.round(rect.height));
+    const pw = Math.max(1, Math.round(cssW * dpr));
+    const ph = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== pw || canvas.height !== ph) {
+      canvas.width = pw;
+      canvas.height = ph;
+    }
+
+    const c = canvas.getContext('2d');
+    runWithContext(c, () => {
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.clearRect(0, 0, pw, ph);
+      c.scale(dpr, dpr);
+      c.fillStyle = 'rgba(255,255,255,0.08)';
+      c.fillRect(0, 0, cssW, cssH);
+
+      const cx = cssW / 2;
+      const bottomY = cssH - 3;
+      const sc = objectThumbLayoutScale(type);
+      pseudo.cx = cx;
+      pseudo.bottomY = bottomY;
+
+      c.save();
+      c.translate(cx, bottomY);
+      c.scale(sc, sc);
+      c.translate(-cx, -bottomY);
+      drawObjectThumbShape(pseudo);
+      c.restore();
+    });
+  });
+}
+
+function drawSparks(b) {
+  for (const p of b.sparks) {
+    ctx.save(); ctx.globalAlpha = Math.max(0, p.life);
+    if (p.type === 'frag') {
+      ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.color; ctx.strokeStyle = p.edge; ctx.lineWidth = 1;
+      ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+      ctx.strokeRect(-p.w / 2, -p.h / 2, p.w, p.h);
+    } else if (p.type === 'drop') {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fillStyle = b.color + 'bb'; ctx.fill();
+      ctx.beginPath(); ctx.arc(p.x - p.r * 0.28, p.y - p.r * 0.28, p.r * 0.32, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,0.55)'; ctx.fill();
+    } else {
+      ctx.fillStyle = '#a08060';
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function spawnSparks(b) {
+  if (b.type === 'bottle' && b.water > 0) {
+    const capY  = GY - TH;
+    const speed = 80 + Math.sqrt(b.h) * 60;
+    const wf    = b.water / 100;
+
+    const jetCount = Math.round(5 + wf * 18);
+    for (let i = 0; i < jetCount; i++) {
+      const a = -(Math.PI / 2) + (Math.random() - 0.5) * 0.55;
+      const s = speed * (0.55 + Math.random() * 0.75);
+      b.sparks.push({type: 'drop',
+        x: b.cx + (Math.random() - 0.5) * NW * 0.9, y: capY,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        r: 1.8 + Math.random() * 3, life: 0.65 + Math.random() * 0.5});
+    }
+
+    const sprayCount = Math.round(3 + wf * 10);
+    for (let i = 0; i < sprayCount; i++) {
+      const a = -Math.PI * (0.1 + Math.random() * 0.8);
+      const s = speed * (0.30 + Math.random() * 0.45);
+      b.sparks.push({type: 'drop',
+        x: b.cx + (Math.random() - 0.5) * NW, y: capY + CH,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        r: 1 + Math.random() * 2, life: 0.4 + Math.random() * 0.4});
+    }
+  }
+
+  const n = 4 + Math.round(b.h * 0.5);
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI * (0.1 + Math.random() * 0.8);
+    const s = 20 + Math.random() * 50;
+    b.sparks.push({type: 'dust',
+      x: b.cx + (Math.random() - 0.5) * BW * 0.9, y: GY - 2,
+      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      r: 1.5 + Math.random() * 2, life: 0.4 + Math.random() * 0.3});
+  }
+}
+
+function tickSparks(b, dt) {
+  for (const p of b.sparks) {
+    p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 920 * dt;
+    if (p.type === 'frag') p.rot += p.rotSpd * dt;
+    p.life -= dt * (p.type === 'dust' ? 3.5 : 2);
+  }
+  b.sparks = b.sparks.filter(p => p.life > 0 && p.y < GY + 30);
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H); drawBg(); drawRuler(); drawAirDensity();
+  BOTTLES.forEach((b, i) => {
+    drawObject(b);
+    if (isSetupState() && selectedIdx === i) {
+      drawSelectHighlight(b);
+      drawHeightReadout(b);
+    }
+    drawSparks(b);
+  });
+}
+
+function physicsStep(b, dt) {
+  const m    = bottleMass(b);
+  const drag = 0.5 * RHO * OBJECT_TYPES[b.type].cdA * b.vy * b.vy;
+  const a    = g - drag / m;
+  b.vy    += a * dt;
+  b.fallen += b.vy * dt;
+}
+
+function animate(ts) {
+  if (!t0) t0 = ts;
+  elapsed = (ts - t0) / 1000;
+  const frameDt = prevTs ? Math.min(.05, (ts - prevTs) / 1000) : 1 / 60;
+  prevTs = ts;
+
+  let allLanded = true;
+  for (const b of BOTTLES) {
+    if (state === 'falling' && !b.landed) {
+      allLanded = false;
+
+      let remaining = frameDt;
+      while (remaining > 0) {
+        const step = Math.min(remaining, SIM_DT);
+        physicsStep(b, step);
+        remaining -= step;
+      }
+
+      const ny = GY - (b.h - b.fallen) * PPM;
+      if (ny >= GY) {
+        b.bottomY  = GY;
+        b.landed   = true;
+        b.landTime = elapsed;
+        spawnSparks(b);
+      } else {
+        b.bottomY = ny;
+      }
+    }
+    tickSparks(b, frameDt);
+  }
+
+  draw();
+
+  if (allLanded && state === 'falling') {
+    state = 'done';
+    selectedIdx = null;
+    resetFallResetUnlockState();
+    syncObjPanel();
+    syncActionButton();
+    showFirstTouchResult();
+  }
+  if ((state === 'falling' && !allLanded) || BOTTLES.some(b => b.sparks.length > 0)) {
+    raf = requestAnimationFrame(animate);
+  } else {
+    raf = null;
+  }
+}
+
+function startAnimIfNeeded() {
+  return;
+}
+
+function stopDragPointer(e) {
+  if (dragIdx === null) return;
+  if (typeof cv.hasPointerCapture === 'function' && cv.hasPointerCapture(e.pointerId)) {
+    try { cv.releasePointerCapture(e.pointerId); } catch (_) {}
+  }
+  dragIdx = null;
+  cv.classList.remove('dragging');
+}
+
+cv.addEventListener('pointerdown', (e) => {
+  if (!isSetupState()) return;
+  if (e.button !== 0 && e.pointerType === 'mouse') return;
+  const { mx, my } = clientToCanvas(e);
+  const hit = hitTestBottle(mx, my);
+  if (hit >= 0) {
+    if (state === 'done') state = 'idle';
+    selectedIdx = hit;
+    syncObjPanel();
+    dragIdx = hit;
+    cv.setPointerCapture(e.pointerId);
+    cv.classList.add('dragging');
+    applyCanvasYToHeight(BOTTLES[hit], my);
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    state = 'idle';
+    syncActionButton();
+    init(); draw(); startAnimIfNeeded();
+    e.preventDefault();
+  } else {
+    selectedIdx = null;
+    syncObjPanel();
+    draw();
+    startAnimIfNeeded();
+  }
+});
+
+cv.addEventListener('pointermove', (e) => {
+  if (dragIdx === null) return;
+  if (state === 'done') state = 'idle';
+  const { mx, my } = clientToCanvas(e);
+  applyCanvasYToHeight(BOTTLES[dragIdx], my);
+  if (raf) { cancelAnimationFrame(raf); raf = null; }
+  state = 'idle';
+  syncActionButton();
+  init(); draw(); startAnimIfNeeded();
+  e.preventDefault();
+});
+
+cv.addEventListener('pointerup', (e) => { stopDragPointer(e); draw(); startAnimIfNeeded(); });
+cv.addEventListener('pointercancel', (e) => { stopDragPointer(e); draw(); startAnimIfNeeded(); });
+
+dropBtn.addEventListener('click', () => {
+  if (state === 'falling' && !fallResetUnlocked) return;
+
+  if (state === 'done' || state === 'falling') {
+    if (raf) { cancelAnimationFrame(raf); raf = null; }
+    state = 'idle';
+    syncActionButton();
+    init(); draw(); startAnimIfNeeded();
+    return;
+  }
+
+  if (raf) { cancelAnimationFrame(raf); raf = null; }
+  resetFallResetUnlockState();
+  selectedIdx = null;
+  syncObjPanel();
+  state = 'falling'; t0 = null; prevTs = null;
+  syncActionButton();
+  init();
+  scheduleFallResetUnlock();
+  raf = requestAnimationFrame(animate);
+});
+
+function getObjPanelTarget() {
+  return selectedIdx === null ? 0 : selectedIdx;
+}
+
+function syncObjPanel() {
+  const objPanelTarget = getObjPanelTarget();
+  /* panel is display-only; no selection toggling needed */
+}
+
+/* obj-choice click handler removed — panel is pointer-events:none */
+
+function setRho(val) {
+  const EPS = 1e-9;
+  RHO = val;
+  document.getElementById('rhoSlider').value = val;
+  document.getElementById('rhoVal').textContent = val.toFixed(3) + ' kg/m³';
+  const moonActive = Math.abs(val - 0) <= EPS;
+  const earthActive = val >= 1.16 && val <= 1.35;
+  const titanActive = Math.abs(val - 4) <= EPS;
+  document.querySelectorAll('.air-world').forEach(el => {
+    const world = el.dataset.world;
+    const active = (world === 'moon' && moonActive) ||
+      (world === 'earth' && earthActive) ||
+      (world === 'titan' && titanActive);
+    el.classList.toggle('active', active);
+  });
+  // Reflect air-density changes on the canvas immediately while dragging slider.
+  if (state !== 'falling') {
+    draw();
+    startAnimIfNeeded();
+  }
+}
+
+/* air density locked to Earth — slider and world buttons disabled */
+
+syncObjPanel();
+syncActionButton();
+setRho(RHO);
+updateBottleScale(); init(); draw();
+requestAnimationFrame(() => refreshObjectChoiceThumbs());
+window.addEventListener('resize', () => {
+  requestAnimationFrame(refreshObjectChoiceThumbs);
+});
+</script>
+</body>
+</html>
