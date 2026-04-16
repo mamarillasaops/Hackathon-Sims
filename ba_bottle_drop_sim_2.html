@@ -827,6 +827,7 @@ function drawAirDensity() {
 }
 
 function drawObject(b) {
+  if (b.shattered) { drawBadge(b, 0); return; }
   drawShadow(b, BW * 0.5);
   drawBottleShape(b);
   if (b.landed) drawBadge(b, objTopY(b));
@@ -913,6 +914,29 @@ function drawSparks(b) {
 }
 
 function spawnSparks(b) {
+  if (b.type === 'bottle' && b.h === 30) {
+    // full shatter at max drop height — applies to both full and partial bottles
+    b.shattered = true;
+    for (let i = 0; i < 12; i++) {
+      const a = -Math.PI * (.04 + Math.random() * .92);
+      const s = 100 + Math.random() * 280;
+      b.sparks.push({type: 'frag', x: b.cx + (Math.random() - .5) * BW, y: GY - BH * .5,
+        vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+        rot: Math.random() * Math.PI * 2, rotSpd: (Math.random() - .5) * 14,
+        w: 4 + Math.random() * 14, h: 3 + Math.random() * 8,
+        color: b.color, edge: b.cap, life: 1.1 + Math.random() * .4});
+    }
+    if (b.water > 0) {
+      for (let i = 0; i < 28; i++) {
+        const a = -Math.PI * (.06 + Math.random() * .88);
+        const s = 80 + Math.random() * 320;
+        b.sparks.push({type: 'drop', x: b.cx + (Math.random() - .5) * BW * .7, y: GY - 4,
+          vx: Math.cos(a) * s, vy: Math.sin(a) * s, r: 2 + Math.random() * 4, life: .7 + Math.random() * .6});
+      }
+    }
+    return;
+  }
+
   if (b.type === 'bottle' && b.water > 0) {
     const capY  = GY - TH;
     const speed = 80 + Math.sqrt(b.h) * 60;
