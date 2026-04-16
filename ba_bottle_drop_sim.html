@@ -524,6 +524,7 @@ const BOTTLES = [
 ];
 
 let state = 'idle', t0 = null, elapsed = 0, raf = null, prevTs = null;
+let shakeIntensity = 0, shakeDecay = 6;
 let selectedIdx = null;
 let dragIdx = null;
 const FALL_RESET_UNLOCK_DELAY_MS = 2000;
@@ -651,6 +652,7 @@ function init() {
     b.stain   = null;
   }
   elapsed = 0;
+  shakeIntensity = 0;
 }
 
 function clientToCanvas(ev) {
@@ -1778,6 +1780,51 @@ function spawnSparks(b) {
     return;
   }
 
+  if (b.type === 'microphone' && b.h === 30) {
+    // mic drops hard — dark body pieces + silver head chunks + bright sparks
+    b.shattered = true;
+    const s     = Math.max(0.5, BW / 40);
+    const bodyW = Math.max(24, Math.round(50 * s));
+    const bodyH = Math.max(8,  Math.round(13 * s));
+    const headR = Math.max(8,  Math.round(12 * s));
+    const midY  = GY - bodyH * 0.5;
+    // dark body fragments
+    for (let i = 0; i < 10; i++) {
+      const a   = -Math.PI * (0.04 + Math.random() * 0.92);
+      const sp  = 90 + Math.random() * 220;
+      b.sparks.push({type: 'frag',
+        x: b.cx + (Math.random() - 0.5) * bodyW, y: midY + (Math.random() - 0.5) * bodyH,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        rot: Math.random() * Math.PI * 2, rotSpd: (Math.random() - 0.5) * 18,
+        w: 5 + Math.random() * 11, h: 3 + Math.random() * 7,
+        color: Math.random() < 0.5 ? '#1a1d22' : '#34383f', edge: '#0a0c0f',
+        life: 1.0 + Math.random() * 0.4});
+    }
+    // silver mic-head chunks
+    for (let i = 0; i < 5; i++) {
+      const a  = -Math.PI * (0.08 + Math.random() * 0.84);
+      const sp = 60 + Math.random() * 170;
+      b.sparks.push({type: 'frag',
+        x: b.cx + bodyW * 0.38 + (Math.random() - 0.5) * headR, y: midY,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        rot: Math.random() * Math.PI * 2, rotSpd: (Math.random() - 0.5) * 14,
+        w: 3 + Math.random() * 8, h: 3 + Math.random() * 8,
+        color: '#c0c4cc', edge: '#808892', life: 0.9 + Math.random() * 0.4});
+    }
+    // bright electric sparks
+    for (let i = 0; i < 22; i++) {
+      const a  = -Math.PI * (0.02 + Math.random() * 0.96);
+      const sp = 130 + Math.random() * 370;
+      b.sparks.push({type: 'frag',
+        x: b.cx + (Math.random() - 0.5) * bodyW * 0.7, y: midY,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        rot: 0, rotSpd: 0,
+        w: 1.5 + Math.random() * 2.5, h: 1.5 + Math.random() * 2.5,
+        color: '#ffe84a', edge: '#ffaa00', life: 0.35 + Math.random() * 0.3});
+    }
+    return;
+  }
+
   if (b.type === 'bottle' && b.water > 0) {
     // liquid splash out the top of the bottle
     const capY  = GY - TH;          // top of cap when bottle has just landed
@@ -1859,6 +1906,10 @@ function spawnSparks(b) {
     }
   }
 
+  if (b.type === 'anvil' && b.h === 30) {
+    shakeIntensity = 18;
+  }
+
   // ground-impact dust for all objects
   const n = 4 + Math.round(b.h * 0.5);
   for (let i = 0; i < n; i++) {
@@ -1890,7 +1941,14 @@ function tickSparks(b, dt) {
 }
 
 function draw() {
-  ctx.clearRect(0, 0, W, H); drawBg(); drawRuler(); drawAirDensity();
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (shakeIntensity > 0.2) {
+    const ox = (Math.random() - 0.5) * shakeIntensity;
+    const oy = (Math.random() - 0.5) * shakeIntensity;
+    ctx.translate(ox, oy);
+  }
+  drawBg(); drawRuler(); drawAirDensity();
   BOTTLES.forEach(b => { if (b.stain) drawStain(b.stain); });
   BOTTLES.forEach((b, i) => {
     drawObject(b);
@@ -1900,6 +1958,7 @@ function draw() {
     }
     drawSparks(b);
   });
+  ctx.restore();
 }
 
 function physicsStep(b, dt) {
@@ -1915,6 +1974,8 @@ function animate(ts) {
   elapsed = (ts - t0) / 1000;
   const frameDt = prevTs ? Math.min(.05, (ts - prevTs) / 1000) : 1 / 60;
   prevTs = ts;
+
+  if (shakeIntensity > 0) shakeIntensity = Math.max(0, shakeIntensity - shakeDecay * frameDt * shakeIntensity);
 
   let allLanded = true;
   for (const b of BOTTLES) {
