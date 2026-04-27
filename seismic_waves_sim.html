@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Seismic Waves & Earth Interior</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 600px; height: 500px; overflow: hidden;
+    background: #06060f;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    position: relative;
+  }
+  canvas { display: block; position: absolute; top: 0; left: 0; }
+  #controls {
+    position: absolute; bottom: 0; left: 0; right: 0; height: 60px;
+    display: flex; flex-direction: column; justify-content: center;
+    padding: 4px 14px; gap: 5px;
+    background: rgba(6,6,18,0.93);
+    border-top: 1px solid rgba(80,110,190,0.3);
+  }
+  #modeRow { display: flex; gap: 5px; }
+  .modeBtn {
+    flex: 1; padding: 3px 4px; font-size: 10px; cursor: pointer;
+    border-radius: 3px; border: 1px solid rgba(90,120,200,0.4);
+    background: rgba(20,20,60,0.85); color: #99b; white-space: nowrap;
+    transition: all 0.15s;
+  }
+  .modeBtn.active { background: rgba(40,80,190,0.55); color: #ddf; border-color: rgba(110,160,255,0.75); }
+  #sliderRow { display: flex; align-items: center; gap: 8px; }
+  #sliderRow label { color: #aac; font-size: 10px; white-space: nowrap; }
+  .el { color: #668; font-size: 10px; white-space: nowrap; }
+  #sldSpeed { flex: 1; accent-color: #5bf; }
+</style>
+</head>
+<body>
+<canvas id="cv" width="600" height="500"></canvas>
+<div id="controls">
+  <div id="modeRow">
+    <button class="modeBtn active" data-mode="1">Mode 1 · Uniform Interior</button>
+    <button class="modeBtn"        data-mode="2">Mode 2 · Mantle + Molten Core</button>
+    <button class="modeBtn"        data-mode="3">Mode 3 · Full Structure</button>
+  </div>
+  <div id="sliderRow">
+    <label>Core Density:</label>
+    <span class="el">Slower</span>
+    <input type="range" id="sldSpeed" min="-100" max="100" value="0">
+    <span class="el">Faster</span>
+  </div>
+</div>
+
+<script>
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W = 600, H = 500, CH = 60, DH = H - CH; // DH = 440
+
+// Earth geometry
+const CX = 300, CY = 222, ER = 182;
+const EX = CX, EY = CY - ER; // epicenter at top (300, 40)
+
+// Layer radii as fraction of ER
+const R2   = 0.45;               // mode-2 core radius
+const R3o  = 0.45, R3i = 0.22;  // mode-3 outer / inner core radii
+
+let mode     = 1;
+let coreSpd  = 0;  // slider  −1 … +1
+let time     = 0;
+let pRays    = [], sRays = [];
+let pShadow  = null; // angular distance (rad) where P-wave shadow begins, null = no shadow
+let sShadow  = null; // same for S-waves
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+document.querySelectorAll('.modeBtn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    mode = +btn.dataset.mode;
+    document.querySelectorAll('.modeBtn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    coreSpd = 0;
+    document.getElementById('sldSpeed').value = 0;
+    computeRays();
+  });
+});
+document.getElementById('sldSpeed').addEventListener('input', e => {
+  coreSpd = e.target.value / 100;
+  computeRays();
+});
+
+// ── Physics ───────────────────────────────────────────────────────────────────
+function nR(x, y) { return Math.hypot(x - CX, y - CY) / ER; }
+
+function smstep(a, b, t) {
+  t = Math.max(0, Math.min(1, (t - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+// Wave speed at pixel (x, y), mode-dependent.
+// Slider controls:
+//   Mode 1 – gradient from center to surface
+//   Mode 2 – only the (single) molten core speed
+//   Mode 3 – only the solid inner-core speed
+function vAt(x, y) {
+  const r = nR(x, y);
+  if (r > 1.01) return 1.0;
+
+  if (mode === 1) {
+    // Continuous radial gradient: v = 1 + coreSpd * scale * (1 − r)
+    // At slider centre (coreSpd=0) v=1 everywhere → straight rays / no refraction.
+    return Math.max(0.1, 1.0 + coreSpd * 0.80 * (1 - r));
+
+  } else if (mode === 2) {
+    // Mantle: speed rises from 1.0 at surface to ~1.5 at CMB (fixed moderate refraction)
+    // Core  : slider-controlled
+    const cBlend  = 1 - smstep(R2 - 0.05, R2 + 0.05, r); // 1 inside core, 0 in mantle
+    const vMantle = 1.0 + 0.50 * smstep(1.0, R2, r);      // 1.0 → 1.5
+    const vCore   = Math.max(0.1, 1.25 + coreSpd * 0.85); // slider-controlled
+    return vMantle * (1 - cBlend) + vCore * cBlend;
+
+  } else { // mode 3
+    // Mantle: same moderate fixed gradient
+    // Outer (molten) core: fixed fast speed  (absorbs S-waves)
+    // Inner (solid) core: slider-controlled
+    const iBlend = 1 - smstep(R3i - 0.04, R3i + 0.04, r);
+    const oBlend = (1 - smstep(R3o - 0.05, R3o + 0.05, r)) * (1 - iBlend);
+    const mBlend = 1 - iBlend - oBlend;
+    const vMantle = 1.0 + 0.50 * smstep(1.0, R3o, r);  // same moderate gradient
+    const vOuter  = 1.60;                                 // fixed outer-core speed
+    // vInner centred on vOuter → slider=0 means no speed jump at inner boundary.
+    // ±1.30 amplitude ensures near-vertical rays are dramatically deflected.
+    const vInner  = Math.max(0.1, 1.60 + coreSpd * 1.30); // range ≈ 0.3 … 2.9
+    return vMantle * mBlend + vOuter * oBlend + vInner * iBlend;
+  }
+}
+
+function vGrad(x, y) {
+  const e = 2.5;
+  return {
+    gx: (vAt(x + e, y) - vAt(x - e, y)) / (2 * e),
+    gy: (vAt(x, y + e) - vAt(x, y - e)) / (2 * e)
+  };
+}
+
+// True when an S-wave at normalised radius r is absorbed by liquid material.
+function sAbsorbed(r) {
+  if (mode === 2) return r < R2  - 0.03;
+  if (mode === 3) return r < R3o - 0.03 && r > R3i - 0.02; // outer core only
+  return false;
+}
+
+// Trace one ray. Returns array of canvas pixel points.
+function traceRay(sx, sy, ux, uy, isS) {
+  const step = 1.2, maxSteps = 3200;
+  let x = sx, y = sy, entered = false;
+  const pts = [{ x, y }];
+  for (let i = 0; i < maxSteps; i++) {
+    const r = nR(x, y);
+    if (r < 0.98) entered = true;
+    if (isS && sAbsorbed(r)) break;
+    if (entered && r >= 1.0) { pts.push({ x, y }); break; }
+    if (i > 20 && (x < -25 || x > W + 25 || y < -25 || y > DH + 25)) break;
+
+    const v = vAt(x, y);
+    const { gx, gy } = vGrad(x, y);
+    const udg = ux * gx + uy * gy;
+    let nux = ux + (ux * udg - gx) / v * step;
+    let nuy = uy + (uy * udg - gy) / v * step;
+    const nm = Math.hypot(nux, nuy);
+    if (nm < 0.001) break;
+    ux = nux / nm; uy = nuy / nm;
+    x += ux * step; y += uy * step;
+    pts.push({ x, y });
+  }
+  return pts;
+}
+
+// Angular distance (radians) from the epicenter to where a ray exits the surface.
+// 0 = same side as epicenter, π = antipodal (bottom of Earth).
+function rayExitAngle(pts) {
+  if (pts.length < 2) return null;
+  const last = pts[pts.length - 1];
+  const dist = Math.hypot(last.x - CX, last.y - CY);
+  if (dist / ER < 0.88) return null; // absorbed, didn't reach surface
+  // Epicenter direction from centre = (0, −1) in canvas.
+  // dot product of exit unit-vector with (0, −1) = −(ey − CY)/dist
+  return Math.acos(Math.max(-1, Math.min(1, -(last.y - CY) / dist)));
+}
+
+// Detect shadow zones using a surface-coverage array.
+// Each ray marks a ±HALF_WIDTH° neighbourhood around its exit point as covered.
+// Any contiguous uncovered arc wider than MIN_SHADOW° is reported as a shadow.
+// This correctly handles both end-shadows (modes 1–2) and band-shadows (mode 3).
+function detectShadows() {
+  const BINS      = 180;         // one bin per degree, 0°–179°
+  const HALF_W    = 14;          // degrees each ray's coverage spans either side
+  const MIN_SHADOW = 22;         // minimum reportable shadow arc (degrees)
+  const SKIP_NEAR  = 18;         // ignore the first 18° (right under epicenter)
+
+  function findShadow(rays) {
+    const cov = new Uint8Array(BINS);
+    rays.forEach(pts => {
+      const a = rayExitAngle(pts);
+      if (a === null) return;
+      const bin = Math.round(a * 180 / Math.PI);
+      for (let b = bin - HALF_W; b <= bin + HALF_W; b++) {
+        if (b >= 0 && b < BINS) cov[b] = 1;
+      }
+    });
+
+    // Scan for the first uncovered run of at least MIN_SHADOW degrees,
+    // ignoring the near-epicenter region.
+    let runStart = null;
+    for (let b = SKIP_NEAR; b <= BINS; b++) {
+      const empty = (b < BINS) ? !cov[b] : true; // treat end as uncovered
+      if (empty) {
+        if (runStart === null) runStart = b;
+      } else {
+        if (runStart !== null) {
+          if (b - runStart >= MIN_SHADOW)
+            return runStart * Math.PI / 180;
+          runStart = null;
+        }
+      }
+    }
+    return null;
+  }
+
+  pShadow = findShadow(pRays);
+  sShadow = findShadow(sRays);
+}
+
+function computeRays() {
+  pRays = []; sRays = [];
+  const N = 13, maxA = 80;
+  const step   = 2 * maxA / (N - 1);   // ~13.3° spacing
+  const offset = step / 2;              // S-waves staggered by half-step
+
+  for (let i = 0; i < N; i++) {
+    const pDeg = -maxA + i * step;
+    const pa = pDeg * Math.PI / 180;
+    pRays.push(traceRay(EX, EY, Math.sin(pa), Math.cos(pa), false));
+
+    const sDeg = -maxA + offset + i * step;
+    const sa = sDeg * Math.PI / 180;
+    sRays.push(traceRay(EX, EY, Math.sin(sa), Math.cos(sa), true));
+  }
+
+  // Mode 3: add a dense cluster of near-vertical P-rays that penetrate the inner
+  // core at meaningful angles (2°–8° takeoff). The slider-controlled inner-core
+  // speed change deflects these, producing clearly visible exit-angle shifts.
+  if (mode === 3) {
+    for (const deg of [-8, -6, -4, -2, 2, 4, 6, 8]) {
+      const a = deg * Math.PI / 180;
+      pRays.push(traceRay(EX, EY, Math.sin(a), Math.cos(a), false));
+    }
+  }
+
+  detectShadows();
+}
+
+// ── Arc-length helpers ────────────────────────────────────────────────────────
+function arcLens(pts) {
+  const a = [0];
+  for (let i = 1; i < pts.length; i++)
+    a.push(a[a.length - 1] + Math.hypot(pts[i].x - pts[i-1].x, pts[i].y - pts[i-1].y));
+  return a;
+}
+
+function ptAtDist(pts, lens, d) {
+  if (d <= 0) return pts[0];
+  const tot = lens[lens.length - 1];
+  if (d >= tot) return pts[pts.length - 1];
+  let lo = 0, hi = lens.length - 2;
+  while (lo < hi - 1) { const mid = (lo + hi) >> 1; if (lens[mid] <= d) lo = mid; else hi = mid; }
+  const seg = lens[lo + 1] - lens[lo];
+  const t = seg > 0.001 ? (d - lens[lo]) / seg : 0;
+  return { x: pts[lo].x + (pts[lo+1].x - pts[lo].x) * t,
+           y: pts[lo].y + (pts[lo+1].y - pts[lo].y) * t };
+}
+
+// ── Drawing helpers ───────────────────────────────────────────────────────────
+
+// Canvas position of a point at angular distance θ from epicenter (on right side).
+// θ=0 → top (epicenter), θ=π → bottom (antipodal).
+function surfacePoint(theta, r) {
+  return { x: CX + r * Math.sin(theta), y: CY - r * Math.cos(theta) };
+}
+
+// Draw a filled arrowhead pointing in direction (dx, dy).
+function drawArrow(px, py, dx, dy, size, fillStyle) {
+  const px2 = -dy, py2 = dx;
+  const tip = { x: px + dx * size,                         y: py + dy * size };
+  const bl  = { x: px - dx * size * 0.5 + px2 * size * 0.6, y: py - dy * size * 0.5 + py2 * size * 0.6 };
+  const br  = { x: px - dx * size * 0.5 - px2 * size * 0.6, y: py - dy * size * 0.5 - py2 * size * 0.6 };
+  ctx.beginPath();
+  ctx.moveTo(tip.x, tip.y); ctx.lineTo(bl.x, bl.y); ctx.lineTo(br.x, br.y);
+  ctx.closePath();
+  ctx.fillStyle = fillStyle; ctx.fill();
+}
+
+// Small floating text label with dark background.
+function floatLabel(lx, ly, text, col, align = 'center') {
+  ctx.save();
+  ctx.font = 'bold 8.5px Segoe UI'; ctx.textAlign = align;
+  const tw = ctx.measureText(text).width;
+  const ox = align === 'center' ? 0 : align === 'left' ? tw / 2 + 3 : -(tw / 2 + 3);
+  ctx.fillStyle = 'rgba(0,0,0,0.58)';
+  ctx.fillRect(lx + ox - tw / 2 - 3, ly - 9, tw + 6, 12);
+  ctx.fillStyle = col; ctx.fillText(text, lx, ly);
+  ctx.restore();
+}
+
+// ── Main draw functions ───────────────────────────────────────────────────────
+function drawBG() {
+  ctx.fillStyle = '#06060f';
+  ctx.fillRect(0, 0, W, DH);
+  const stars = [[18,14],[55,82],[85,28],[12,195],[558,18],[575,148],[592,90],
+                 [543,202],[50,382],[578,314],[132,355],[542,372],[20,290],[580,260]];
+  ctx.fillStyle = 'rgba(255,255,255,0.52)';
+  stars.forEach(([sx, sy]) => {
+    if (Math.hypot(sx - CX, sy - CY) > ER + 8) {
+      ctx.beginPath(); ctx.arc(sx, sy, 0.9, 0, Math.PI * 2); ctx.fill();
+    }
+  });
+}
+
+function drawEarth() {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(CX, CY, ER, 0, Math.PI * 2); ctx.clip();
+
+  if (mode === 1) {
+    // Single circle – no visible layers.
+    // Tint the gradient colour to subtly hint at density.
+    const cAbs = Math.abs(coreSpd);
+    const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, ER);
+    if (coreSpd >= 0) {
+      // Faster / denser core: warmer blue-gray at centre
+      g.addColorStop(0,   `rgb(${Math.round(60+90*coreSpd)},${Math.round(70+30*coreSpd)},160)`);
+      g.addColorStop(0.6,  '#283070');
+      g.addColorStop(1.0,  '#1c2250');
+    } else {
+      // Slower core: cooler (more blue) at centre
+      g.addColorStop(0,   `rgb(20,${Math.round(50+70*cAbs)},${Math.round(140+80*cAbs)})`);
+      g.addColorStop(0.6,  '#1e2860');
+      g.addColorStop(1.0,  '#1c2250');
+    }
+    ctx.fillStyle = g;
+    ctx.fillRect(CX - ER, CY - ER, 2 * ER, 2 * ER);
+
+  } else if (mode === 2) {
+    // Two visible layers: mantle + molten core.
+    const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, ER);
+    g.addColorStop(0,           '#ffe050');  // core centre
+    g.addColorStop(R2 * 0.75,  '#ff7700');
+    g.addColorStop(R2,          '#cc2a00');
+    g.addColorStop(R2 + 0.02,   '#3e1206');  // mantle inner
+    g.addColorStop(0.72,        '#5c2210');
+    g.addColorStop(0.95,        '#9a5528');
+    g.addColorStop(1.0,         '#b09878');  // crust
+    ctx.fillStyle = g;
+    ctx.fillRect(CX - ER, CY - ER, 2 * ER, 2 * ER);
+
+  } else { // mode 3
+    // Three visible layers: inner core + outer (molten) core + mantle.
+    const g = ctx.createRadialGradient(CX, CY, 0, CX, CY, ER);
+    g.addColorStop(0,            '#fffde6');
+    g.addColorStop(R3i * 0.8,   '#ffe040');
+    g.addColorStop(R3i,          '#ffb818');
+    g.addColorStop(R3i + 0.01,   '#ff7e00');
+    g.addColorStop(R3o - 0.04,   '#dd2e00');
+    g.addColorStop(R3o,          '#991800');
+    g.addColorStop(R3o + 0.02,   '#3e1206');
+    g.addColorStop(0.72,         '#5c2210');
+    g.addColorStop(0.95,         '#9a5528');
+    g.addColorStop(1.0,          '#b09878');
+    ctx.fillStyle = g;
+    ctx.fillRect(CX - ER, CY - ER, 2 * ER, 2 * ER);
+  }
+
+  ctx.restore();
+
+  // Layer boundary rings drawn outside the clip (sharp edge on Earth circle)
+  if (mode === 2) {
+    ctx.beginPath(); ctx.arc(CX, CY, R2 * ER, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,160,40,0.38)'; ctx.lineWidth = 1.4; ctx.stroke();
+  } else if (mode === 3) {
+    ctx.beginPath(); ctx.arc(CX, CY, R3i * ER, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,230,80,0.25)'; ctx.lineWidth = 0.9; ctx.stroke();
+    ctx.beginPath(); ctx.arc(CX, CY, R3o * ER, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,150,40,0.38)'; ctx.lineWidth = 1.4; ctx.stroke();
+  }
+
+  // Earth outline
+  ctx.beginPath(); ctx.arc(CX, CY, ER, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(130,180,240,0.38)'; ctx.lineWidth = 1.5; ctx.stroke();
+}
+
+function drawRays() {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(CX, CY, ER + 0.5, 0, Math.PI * 2); ctx.clip();
+
+  // S-waves: dashed orange
+  ctx.setLineDash([5, 4]); ctx.lineWidth = 1.4;
+  sRays.forEach(pts => {
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.strokeStyle = 'rgba(255,100,25,0.60)'; ctx.stroke();
+  });
+
+  // P-waves: solid cyan
+  ctx.setLineDash([]); ctx.lineWidth = 1.4;
+  pRays.forEach(pts => {
+    if (pts.length < 2) return;
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
+    ctx.strokeStyle = 'rgba(25,205,255,0.65)'; ctx.stroke();
+  });
+
+  // Absorption markers for S-waves (modes 2 & 3)
+  if (mode !== 1) {
+    sRays.forEach(pts => {
+      if (pts.length < 2) return;
+      const last = pts[pts.length - 1];
+      if (nR(last.x, last.y) < 0.48) {
+        ctx.beginPath(); ctx.arc(last.x, last.y, 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,70,10,0.85)'; ctx.fill();
+      }
+    });
+  }
+
+  ctx.restore();
+}
+
+function drawPulses() {
+  ctx.save();
+  ctx.beginPath(); ctx.arc(CX, CY, ER + 0.5, 0, Math.PI * 2); ctx.clip();
+
+  const pPeriod = 2.5, sPeriod = 3.8, nPulse = 3, DIR = 6;
+
+  function pulsesOnRay(rays, period, size, colFn) {
+    rays.forEach(pts => {
+      if (pts.length < 3) return;
+      const lens  = arcLens(pts);
+      const total = lens[lens.length - 1];
+      if (total < DIR * 2) return;
+      for (let k = 0; k < nPulse; k++) {
+        const frac = ((time / period + k / nPulse) % 1.0);
+        const d    = frac * total;
+        const p    = ptAtDist(pts, lens, d);
+        const pb   = ptAtDist(pts, lens, Math.max(0, d - DIR));
+        const pf   = ptAtDist(pts, lens, Math.min(total, d + DIR));
+        let ddx = pf.x - pb.x, ddy = pf.y - pb.y;
+        const dm = Math.hypot(ddx, ddy);
+        if (dm < 0.001) continue;
+        ddx /= dm; ddy /= dm;
+        const alpha = 0.40 + 0.60 * Math.sin(frac * Math.PI);
+        drawArrow(p.x, p.y, ddx, ddy, size, colFn(alpha));
+      }
+    });
+  }
+
+  pulsesOnRay(pRays, pPeriod, 5.5, a => `rgba(55,215,255,${a.toFixed(2)})`);
+  pulsesOnRay(sRays, sPeriod, 5.5, a => `rgba(255,120,35,${a.toFixed(2)})`);
+  ctx.restore();
+}
+
+function drawEpicenter() {
+  const pulse = 0.5 + 0.5 * Math.sin(time * 3.5);
+  const gr = ctx.createRadialGradient(EX, EY, 0, EX, EY, 22);
+  gr.addColorStop(0,   `rgba(255,220,60,${(0.65 + 0.35 * pulse).toFixed(2)})`);
+  gr.addColorStop(0.5, `rgba(255,100,10,${(0.28 * pulse).toFixed(2)})`);
+  gr.addColorStop(1,   'rgba(255,50,0,0)');
+  ctx.fillStyle = gr;
+  ctx.beginPath(); ctx.arc(EX, EY, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(EX, EY, 4,  0, Math.PI * 2);
+  ctx.fillStyle = '#fff'; ctx.fill();
+  ctx.strokeStyle = 'rgba(255,200,50,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+  floatLabel(EX, EY - 15, '★  EPICENTER', '#ffe06a');
+}
+
+// Draw the shadow-zone arcs and their labels.
+// Uses the detected pShadow / sShadow angular thresholds.
+function drawShadowZones() {
+  // Draw a thick arc from angular distance θ_start to π (both sides, centred at bottom).
+  function shadowArc(theta, color, width) {
+    // canvas angle for a point at angular distance θ from epicenter (right side) = −π/2 + θ
+    const sa = -Math.PI / 2 + theta; // right boundary (clockwise from top)
+    const ea = -Math.PI / 2 - theta; // left boundary
+    ctx.beginPath();
+    ctx.arc(CX, CY, ER + 2.5, sa, ea, false); // clockwise → goes through bottom
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
+  }
+
+  // Place a label at the midpoint of the shadow arc (on the right side).
+  function shadowLabel(theta_start, theta_end, text, col) {
+    const mid = (theta_start + theta_end) / 2;
+    const sp  = surfacePoint(mid, ER + 18);
+    // Keep inside canvas
+    const lx = Math.max(40, Math.min(W - 40, sp.x));
+    const ly = Math.max(10, Math.min(DH - 10, sp.y));
+    floatLabel(lx, ly, text, col);
+  }
+
+  // S-wave shadow (orange) drawn first so P total-shadow (red) appears on top.
+  if (sShadow !== null && mode !== 1) {
+    shadowArc(sShadow, 'rgba(255,160,30,0.65)', 3.5);
+    // Label only the region NOT also covered by total shadow
+    const bandEnd = pShadow !== null && pShadow > sShadow + 5 * Math.PI / 180
+      ? pShadow : Math.PI;
+    shadowLabel(sShadow, bandEnd, 'S-WAVE SHADOW', 'rgba(255,175,50,0.95)');
+  }
+
+  // Total shadow (red)
+  if (pShadow !== null) {
+    shadowArc(pShadow, 'rgba(255,55,55,0.70)', 4);
+    shadowLabel(pShadow, Math.PI, 'TOTAL SHADOW', 'rgba(255,80,80,0.95)');
+  }
+}
+
+// In-diagram labels: layer names + P/S wave type tags.
+function drawDiagramLabels() {
+
+  // ── Layer labels ──────────────────────────────────────────────────────────
+  function layerLabel(lx, ly, text, col) {
+    const lines = text.split('\n');
+    ctx.save();
+    ctx.font = 'bold 9px Segoe UI'; ctx.textAlign = 'center';
+    const fh = 10, pad = 3, gap = 2;
+    const fw  = Math.max(...lines.map(l => ctx.measureText(l).width));
+    const bh  = lines.length * fh + (lines.length - 1) * gap + pad * 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.52)';
+    ctx.fillRect(lx - fw / 2 - pad, ly - bh / 2, fw + pad * 2, bh);
+    ctx.fillStyle = col;
+    lines.forEach((line, li) => {
+      ctx.fillText(line, lx, ly - bh / 2 + pad + li * (fh + gap) + fh * 0.82);
+    });
+    ctx.restore();
+  }
+
+  if (mode === 1) {
+    layerLabel(CX, CY, 'Earth Interior', '#8899cc');
+  } else if (mode === 2) {
+    layerLabel(CX,       CY + 15, 'Molten Core', '#ffaa44');
+    layerLabel(CX + 105, CY + 80, 'Mantle',      '#aa7755');
+  } else {
+    layerLabel(CX,       CY,      'Inner\nCore',  '#ffe87a');
+    layerLabel(CX + 44,  CY + 56, 'Outer\nCore',  '#ff9944');
+    layerLabel(CX + 108, CY + 88, 'Mantle',       '#aa7755');
+  }
+
+  // ── P-wave / S-wave inline labels on a representative ray ─────────────────
+  // Pick a ray near index 10/13 for P (rightward steep ray),
+  // and near index 3/13 for S (leftward steep ray).
+  function waveLabel(rays, idx, frac, text, col, perpSide) {
+    if (!rays[idx] || rays[idx].length < 10) return;
+    const pts  = rays[idx];
+    const lens = arcLens(pts);
+    const tot  = lens[lens.length - 1];
+    const p    = ptAtDist(pts, lens, tot * frac);
+    const pb   = ptAtDist(pts, lens, tot * (frac - 0.06));
+    const pf   = ptAtDist(pts, lens, tot * (frac + 0.06));
+    let ddx = pf.x - pb.x, ddy = pf.y - pb.y;
+    const dm = Math.hypot(ddx, ddy);
+    if (dm < 0.001) return;
+    ddx /= dm; ddy /= dm;
+    // Perpendicular offset
+    const px2 = -ddy * 14 * perpSide, py2 = ddx * 14 * perpSide;
+    floatLabel(p.x + px2, p.y + py2, text, col);
+  }
+
+  // P label: use a rightward ray at ~30% along
+  waveLabel(pRays, 10, 0.30, 'P-wave', 'rgba(55,210,255,0.95)', +1);
+  // S label: use a leftward ray at ~30% along
+  waveLabel(sRays,  2, 0.30, 'S-wave', 'rgba(255,120,35,0.95)', -1);
+}
+
+// ── Main render loop ──────────────────────────────────────────────────────────
+function render() {
+  ctx.clearRect(0, 0, W, H);
+  drawBG();
+  drawEarth();
+  drawRays();
+  drawPulses();
+  drawEpicenter();
+  drawShadowZones();
+  drawDiagramLabels();
+  time += 0.012;
+  requestAnimationFrame(render);
+}
+
+computeRays();
+render();
+</script>
+</body>
+</html>
